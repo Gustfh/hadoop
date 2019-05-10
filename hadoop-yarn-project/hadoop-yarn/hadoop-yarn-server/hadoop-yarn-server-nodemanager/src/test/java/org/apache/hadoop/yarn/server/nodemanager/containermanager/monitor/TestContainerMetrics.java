@@ -20,7 +20,6 @@ package org.apache.hadoop.yarn.server.nodemanager.containermanager.monitor;
 
 import org.apache.hadoop.metrics2.AbstractMetric;
 import org.apache.hadoop.metrics2.MetricsRecord;
-import org.apache.hadoop.metrics2.MetricsSystem;
 import org.apache.hadoop.metrics2.impl.MetricsCollectorImpl;
 import org.apache.hadoop.metrics2.impl.MetricsRecords;
 import org.apache.hadoop.metrics2.impl.MetricsSystemImpl;
@@ -37,9 +36,6 @@ import java.util.Set;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyString;
-import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 
 public class TestContainerMetrics {
@@ -47,10 +43,6 @@ public class TestContainerMetrics {
   @Test
   public void testContainerMetricsFlow() throws InterruptedException {
     final String ERR = "Error in number of records";
-
-    // Create a dummy MetricsSystem
-    MetricsSystem system = mock(MetricsSystem.class);
-    doReturn(this).when(system).register(anyString(), anyString(), any());
 
     MetricsCollectorImpl collector = new MetricsCollectorImpl();
     ContainerId containerId = mock(ContainerId.class);
@@ -71,7 +63,7 @@ public class TestContainerMetrics {
     assertEquals(ERR, 1, collector.getRecords().size());
     collector.clear();
 
-    metrics.finished();
+    metrics.finished(false);
     metrics.getMetrics(collector, true);
     assertEquals(ERR, 1, collector.getRecords().size());
     collector.clear();
@@ -88,9 +80,6 @@ public class TestContainerMetrics {
   @Test
   public void testContainerMetricsLimit() throws InterruptedException {
     final String ERR = "Error in number of records";
-
-    MetricsSystem system = mock(MetricsSystem.class);
-    doReturn(this).when(system).register(anyString(), anyString(), any());
 
     MetricsCollectorImpl collector = new MetricsCollectorImpl();
     ContainerId containerId = mock(ContainerId.class);
@@ -148,12 +137,11 @@ public class TestContainerMetrics {
     ContainerId containerId3 = ContainerId.newContainerId(appAttemptId, 3);
     ContainerMetrics metrics3 = ContainerMetrics.forContainer(system,
         containerId3, 1, 0);
-    metrics1.finished();
-    metrics2.finished();
+    metrics1.finished(false);
+    metrics2.finished(false);
     system.sampleMetrics();
     system.sampleMetrics();
     Thread.sleep(100);
-    system.stop();
     // verify metrics1 is unregistered
     assertTrue(metrics1 != ContainerMetrics.forContainer(
         system, containerId1, 1, 0));
@@ -163,6 +151,9 @@ public class TestContainerMetrics {
     // verify metrics3 is still registered
     assertTrue(metrics3 == ContainerMetrics.forContainer(
         system, containerId3, 1, 0));
+    // YARN-5190: move stop() to the end to verify registering containerId1 and
+    // containerId2 won't get MetricsException thrown.
+    system.stop();
     system.shutdown();
   }
 
@@ -214,5 +205,22 @@ public class TestContainerMetrics {
       }
     }
     Assert.assertEquals(expectedValues.keySet(), testResults);
+  }
+
+  @Test
+  public void testContainerMetricsUpdateContainerPid() {
+    ContainerId containerId = mock(ContainerId.class);
+    ContainerMetrics metrics = ContainerMetrics.forContainer(containerId,
+        100, 1);
+
+    String origPid = "1234";
+    metrics.recordProcessId(origPid);
+    assertEquals(origPid, metrics.registry.getTag(
+        ContainerMetrics.PROCESSID_INFO.name()).value());
+
+    String newPid = "4321";
+    metrics.recordProcessId(newPid);
+    assertEquals(newPid, metrics.registry.getTag(
+        ContainerMetrics.PROCESSID_INFO.name()).value());
   }
 }

@@ -46,8 +46,8 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.eq;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -443,6 +443,32 @@ public class TestJobHistory {
     // Today's jhist file will also be deleted now since it falls below the
     // retention threshold
     verify(fileInfo, timeout(20000).times(2)).delete();
+  }
+
+  @Test
+  public void testCachedStorageWaitsForFileMove() throws IOException {
+    HistoryFileManager historyManager = mock(HistoryFileManager.class);
+    jobHistory = spy(new JobHistory());
+    doReturn(historyManager).when(jobHistory).createHistoryFileManager();
+
+    Configuration conf = new Configuration();
+    jobHistory.init(conf);
+    jobHistory.start();
+
+    CachedHistoryStorage storage = spy((CachedHistoryStorage) jobHistory
+        .getHistoryStorage());
+
+    Job job  = mock(Job.class);
+    JobId jobId  = mock(JobId.class);
+    when(job.getID()).thenReturn(jobId);
+    when(job.getTotalMaps()).thenReturn(10);
+    when(job.getTotalReduces()).thenReturn(2);
+    HistoryFileInfo fileInfo = mock(HistoryFileInfo.class);
+    when(historyManager.getFileInfo(eq(jobId))).thenReturn(fileInfo);
+    when(fileInfo.loadJob()).thenReturn(job);
+
+    storage.getFullJob(jobId);
+    verify(fileInfo).waitUntilMoved();
   }
 
   @Test

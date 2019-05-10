@@ -33,7 +33,7 @@
   $(window).bind('hashchange', function () {
     $('#alert-panel').hide();
 
-    var dir = window.location.hash.slice(1);
+    var dir = decodeURIComponent(window.location.hash.slice(1));
     if(dir == "") {
       dir = "/";
     }
@@ -93,8 +93,8 @@
         { type: 'DELETE'
         }).done(function(data) {
           browse_directory(current_directory);
-        }).error(network_error_handler(url)
-         ).complete(function() {
+        }).fail(network_error_handler(url)
+         ).always(function() {
            $('#delete-modal').modal('hide');
            $('#delete-button').button('reset');
         });
@@ -140,8 +140,8 @@
     $.ajax(url, { type: 'PUT'
       }).done(function(data) {
         browse_directory(current_directory);
-      }).error(network_error_handler(url))
-      .complete(function() {
+      }).fail(network_error_handler(url))
+      .always(function() {
         $('.explorer-perm-links').popover('destroy');
       });
   }
@@ -192,13 +192,40 @@
       var download_url = '/webhdfs/v1' + abs_path + '?op=OPEN';
 
       $('#file-info-download').attr('href', download_url);
-      $('#file-info-preview').click(function() {
+
+      var processPreview = function(url) {
+        url += "&noredirect=true";
+        $.ajax({
+          type: 'GET',
+          url: url,
+          processData: false,
+          crossDomain: true
+        }).done(function(data) {
+          url = data.Location;
+          $.ajax({
+            type: 'GET',
+            url: url,
+            processData: false,
+            crossDomain: true
+          }).always(function(data) {
+            $('#file-info-preview-body').val(data);
+            $('#file-info-tail').show();
+          }).fail(function(jqXHR, textStatus, errorThrown) {
+            show_err_msg("Couldn't preview the file. " + errorThrown);
+          });
+        }).fail(function(jqXHR, textStatus, errorThrown) {
+          show_err_msg("Couldn't find datanode to read file from. " + errorThrown);
+        });
+      }
+
+      $('#file-info-preview-tail').click(function() {
         var offset = d.fileLength - TAIL_CHUNK_SIZE;
         var url = offset > 0 ? download_url + '&offset=' + offset : download_url;
-        $.get(url, function(t) {
-          $('#file-info-preview-body').val(t);
-          $('#file-info-tail').show();
-        }, "text").error(network_error_handler(url));
+        processPreview(url);
+      });
+      $('#file-info-preview-head').click(function() {
+        var url = d.fileLength > TAIL_CHUNK_SIZE ? download_url + '&length=' + TAIL_CHUNK_SIZE : download_url;
+        processPreview(url);
       });
 
       if (d.fileLength > 0) {
@@ -208,7 +235,7 @@
         $('#file-info-blockinfo-panel').hide();
       }
       $('#file-info').modal();
-    }).error(network_error_handler(url));
+    }).fail(network_error_handler(url));
   }
 
   /**Use X-editable to make fields editable with a nice UI.
@@ -227,8 +254,8 @@
             op + '&' + parameter + '=' + encodeURIComponent(params.value);
 
           return $.ajax(url, { type: 'PUT', })
-            .error(network_error_handler(url))
-            .success(function() {
+            .fail(network_error_handler(url))
+            .done(function() {
                 browse_directory(current_directory);
              });
         },
@@ -310,24 +337,30 @@
           var absolute_file_path = append_path(current_directory, inode_name);
           delete_path(inode_name, absolute_file_path);
         });
-          
-          $('#table-explorer').dataTable( {
-              'lengthMenu': [ [25, 50, 100, -1], [25, 50, 100, "All"] ],
-              'columns': [
-                  {'searchable': false }, //Permissions
-                  null, //Owner
-                  null, //Group
-                  { 'searchable': false, 'render': func_size_render}, //Size
-                  { 'searchable': false, 'render': func_time_render}, //Last Modified
-                  { 'searchable': false }, //Replication
-                  null, //Block Size
-                  null, //Name
-                  { 'sortable' : false } //Trash
-              ],
-              "deferRender": true
-          });
+
+        $('#file-selector-all').click(function() {
+          $('.file_selector').prop('checked', $('#file-selector-all')[0].checked );
+        });
+
+        //This needs to be last because it repaints the table
+        $('#table-explorer').dataTable( {
+          'lengthMenu': [ [25, 50, 100, -1], [25, 50, 100, "All"] ],
+          'columns': [
+            { 'orderable' : false }, //select
+            {'searchable': false }, //Permissions
+            null, //Owner
+            null, //Group
+            { 'searchable': false, 'render': func_size_render}, //Size
+            { 'searchable': false, 'render': func_time_render}, //Last Modified
+            { 'searchable': false }, //Replication
+            null, //Block Size
+            null, //Name
+            { 'orderable' : false } //Trash
+          ],
+          "deferRender": true
+        });
       });
-    }).error(network_error_handler(url));
+    }).fail(network_error_handler(url));
   }
 
 
@@ -337,6 +370,12 @@
 
     var b = function() { browse_directory($('#directory').val()); };
     $('#btn-nav-directory').click(b);
+    //Also navigate to the directory when a user presses enter.
+    $('#directory').on('keyup', function (e) {
+      if (e.which == 13) {
+        browse_directory($('#directory').val());
+      }
+    });
     var dir = window.location.hash.slice(1);
     if(dir == "") {
       window.location.hash = "/";
@@ -359,12 +398,143 @@
     $.ajax(url, { type: 'PUT' }
     ).done(function(data) {
       browse_directory(current_directory);
-    }).error(network_error_handler(url)
-     ).complete(function() {
+    }).fail(network_error_handler(url)
+     ).always(function() {
        $('#btn-create-directory').modal('hide');
        $('#btn-create-directory-send').button('reset');
     });
   })
+
+  $('#btn-upload-files').click(function() {
+        $('#modal-upload-file-button').prop('disabled', true).button('reset');
+        $('#modal-upload-file-input').val(null);
+      });
+
+  $('#btn-create-dir').click(function() {
+        $('#btn-create-directory-send').prop('disabled', true).button('reset');
+        $('#new_directory').val(null);
+      });
+
+  $('#modal-upload-file-input').change(function() {
+      if($('#modal-upload-file-input').prop('files').length >0) {
+         $('#modal-upload-file-button').prop('disabled', false);
+        }
+      else {
+        $('#modal-upload-file-button').prop('disabled', true);
+        }
+      });
+
+  $('#new_directory').on('keyup keypress blur change',function() {
+      if($('#new_directory').val() == '' ||  $('#new_directory').val() == null) {
+         $('#btn-create-directory-send').prop('disabled', true);
+        }
+      else {
+         $('#btn-create-directory-send').prop('disabled', false);
+        }
+      });
+
+  $('#modal-upload-file-button').click(function() {
+    $(this).prop('disabled', true);
+    $(this).button('complete');
+    var files = []
+    var numCompleted = 0
+
+    for(var i = 0; i < $('#modal-upload-file-input').prop('files').length; i++) {
+      (function() {
+        var file = $('#modal-upload-file-input').prop('files')[i];
+        var url = '/webhdfs/v1' + current_directory;
+        url = encode_path(append_path(url, file.name));
+        url += '?op=CREATE&noredirect=true';
+        files.push( { file: file } )
+        files[i].request = $.ajax({
+          type: 'PUT',
+          url: url,
+          processData: false,
+          crossDomain: true
+        });
+      })()
+     }
+    for(var f in files) {
+      (function() {
+        var file = files[f];
+        file.request.done(function(data) {
+          var url = data['Location'];
+          $.ajax({
+            type: 'PUT',
+            url: url,
+            data: file.file,
+            processData: false,
+            crossDomain: true
+          }).always(function(data) {
+            numCompleted++;
+            if(numCompleted == files.length) {
+              reset_upload_button();
+              browse_directory(current_directory);
+            }
+          }).fail(function(jqXHR, textStatus, errorThrown) {
+            numCompleted++;
+            reset_upload_button();
+            show_err_msg("Couldn't upload the file " + file.file.name + ". "+ errorThrown);
+          });
+        }).fail(function(jqXHR, textStatus, errorThrown) {
+          numCompleted++;
+          reset_upload_button();
+          show_err_msg("Couldn't find datanode to write file. " + errorThrown);
+        });
+      })();
+    }
+  });
+
+  //Reset the upload button
+  function reset_upload_button() {
+    $('#modal-upload-file').modal('hide');
+    $('#modal-upload-file-button').button('reset');
+  }
+
+  //Store the list of files which have been checked into session storage
+  function store_selected_files(current_directory) {
+    sessionStorage.setItem("source_directory", current_directory);
+    var selected_files = $("input:checked.file_selector");
+    var selected_file_names = new Array();
+    selected_files.each(function(index) {
+      selected_file_names[index] = $(this).closest('tr').attr('inode-path');
+    })
+    sessionStorage.setItem("selected_file_names", JSON.stringify(selected_file_names));
+    alert("Cut " + selected_file_names.length + " files/directories");
+  }
+
+  //Retrieve the list of files from session storage and rename them to the current
+  //directory
+  function paste_selected_files() {
+    var files = JSON.parse(sessionStorage.getItem("selected_file_names"));
+    var source_directory = sessionStorage.getItem("source_directory");
+    $.each(files, function(index, value) {
+      var url = "/webhdfs/v1"
+        + encode_path(append_path(source_directory, value))
+        + '?op=RENAME&destination='
+        + encode_path(append_path(current_directory, value));
+      $.ajax({
+        type: 'PUT',
+        url: url
+      }).done(function(data) {
+        if(index == files.length - 1) {
+          browse_directory(current_directory);
+        }
+      }).fail(function(jqXHR, textStatus, errorThrown) {
+        show_err_msg("Couldn't move file " + value + ". " + errorThrown);
+      });
+
+    })
+  }
+
+  $('#explorer-cut').click(function() {
+    store_selected_files(current_directory);
+  });
+
+  $('#explorer-paste').click(function() {
+    paste_selected_files();
+  });
+
 
   init();
 })();

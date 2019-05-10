@@ -24,22 +24,29 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.channels.ClosedChannelException;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 
 import com.google.common.base.Preconditions;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.impl.AbstractFSBuilderImpl;
+import org.apache.hadoop.fs.impl.FutureDataInputStreamBuilderImpl;
 import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.util.DataChecksum;
+import org.apache.hadoop.util.LambdaUtils;
 import org.apache.hadoop.util.Progressable;
 
 /****************************************************************
  * Abstract Checksumed FileSystem.
  * It provide a basic implementation of a Checksumed FileSystem,
  * which creates a checksum file for each raw file.
- * It generates & verifies checksums at the client side.
+ * It generates &amp; verifies checksums at the client side.
  *
  *****************************************************************/
 @InterfaceAudience.Public
@@ -197,7 +204,6 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
                new ChecksumFSInputChecker(fs, file)) {
         checker.seek(position);
         nread = checker.read(b, off, len);
-        checker.close();
       }
       return nread;
     }
@@ -356,12 +362,20 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
   @Override
   public FSDataOutputStream append(Path f, int bufferSize,
       Progressable progress) throws IOException {
-    throw new IOException("Not supported");
+    throw new UnsupportedOperationException("Append is not supported "
+        + "by ChecksumFileSystem");
   }
 
   @Override
   public boolean truncate(Path f, long newLength) throws IOException {
-    throw new IOException("Not supported");
+    throw new UnsupportedOperationException("Truncate is not supported "
+        + "by ChecksumFileSystem");
+  }
+
+  @Override
+  public void concat(final Path f, final Path[] psrcs) throws IOException {
+    throw new UnsupportedOperationException("Concat is not supported "
+        + "by ChecksumFileSystem");
   }
 
   /**
@@ -480,6 +494,32 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
       boolean overwrite, int bufferSize, short replication, long blockSize,
       Progressable progress) throws IOException {
     return create(f, permission, overwrite, false, bufferSize, replication,
+        blockSize, progress);
+  }
+
+  @Override
+  public FSDataOutputStream create(final Path f,
+      final FsPermission permission,
+      final EnumSet<CreateFlag> flags,
+      final int bufferSize,
+      final short replication,
+      final long blockSize,
+      final Progressable progress,
+      final Options.ChecksumOpt checksumOpt) throws IOException {
+    return create(f, permission, flags.contains(CreateFlag.OVERWRITE),
+        bufferSize, replication, blockSize, progress);
+  }
+
+  @Override
+  public FSDataOutputStream createNonRecursive(final Path f,
+      final FsPermission permission,
+      final EnumSet<CreateFlag> flags,
+      final int bufferSize,
+      final short replication,
+      final long blockSize,
+      final Progressable progress) throws IOException {
+    return create(f, permission, flags.contains(CreateFlag.OVERWRITE),
+        false, bufferSize, replication,
         blockSize, progress);
   }
 
@@ -604,6 +644,7 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
    * Rename files/dirs
    */
   @Override
+  @SuppressWarnings("deprecation")
   public boolean rename(Path src, Path dst) throws IOException {
     if (fs.isDirectory(src)) {
       return fs.rename(src, dst);
@@ -675,7 +716,14 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
   public FileStatus[] listStatus(Path f) throws IOException {
     return fs.listStatus(f, DEFAULT_FILTER);
   }
-  
+
+  @Override
+  public RemoteIterator<FileStatus> listStatusIterator(final Path p)
+      throws IOException {
+    // Not-using fs#listStatusIterator() since it includes crc files as well
+    return new DirListingIterator<>(p);
+  }
+
   /**
    * List the statuses of the files/directories in the given path if the path is
    * a directory.
@@ -720,6 +768,7 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
    * If src and dst are directories, the copyCrc parameter
    * determines whether to copy CRC files.
    */
+  @SuppressWarnings("deprecation")
   public void copyToLocalFile(Path src, Path dst, boolean copyCrc)
     throws IOException {
     if (!fs.isDirectory(src)) { // source is a file
@@ -769,5 +818,58 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
   public boolean reportChecksumFailure(Path f, FSDataInputStream in,
                                        long inPos, FSDataInputStream sums, long sumsPos) {
     return false;
+  }
+
+  /**
+   * This is overridden to ensure that this class's
+   * {@link #openFileWithOptions}() method is called, and so ultimately
+   * its {@link #open(Path, int)}.
+   *
+   * {@inheritDoc}
+   */
+  @Override
+  public FutureDataInputStreamBuilder openFile(final Path path)
+      throws IOException, UnsupportedOperationException {
+    return ((FutureDataInputStreamBuilderImpl)
+        createDataInputStreamBuilder(this, path)).getThisBuilder();
+  }
+
+  /**
+   * Open the file as a blocking call to {@link #open(Path, int)}.
+   *
+   * {@inheritDoc}
+   */
+  @Override
+  protected CompletableFuture<FSDataInputStream> openFileWithOptions(
+      final Path path,
+      final Set<String> mandatoryKeys,
+      final Configuration options,
+      final int bufferSize) throws IOException {
+    AbstractFSBuilderImpl.rejectUnknownMandatoryKeys(mandatoryKeys,
+        Collections.emptySet(),
+        "for " + path);
+    return LambdaUtils.eval(
+        new CompletableFuture<>(), () -> open(path, bufferSize));
+  }
+
+  /**
+   * This is overridden to ensure that this class's create() method is
+   * ultimately called.
+   *
+   * {@inheritDoc}
+   */
+  public FSDataOutputStreamBuilder createFile(Path path) {
+    return createDataOutputStreamBuilder(this, path)
+        .create().overwrite(true);
+  }
+
+  /**
+   * This is overridden to ensure that this class's create() method is
+   * ultimately called.
+   *
+   * {@inheritDoc}
+   */
+  public FSDataOutputStreamBuilder appendFile(Path path) {
+    return createDataOutputStreamBuilder(this, path).append();
   }
 }

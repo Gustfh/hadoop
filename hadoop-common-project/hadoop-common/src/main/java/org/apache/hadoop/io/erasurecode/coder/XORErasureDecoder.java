@@ -21,7 +21,8 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.io.erasurecode.CodecUtil;
 import org.apache.hadoop.io.erasurecode.ECBlock;
 import org.apache.hadoop.io.erasurecode.ECBlockGroup;
-import org.apache.hadoop.io.erasurecode.ECSchema;
+import org.apache.hadoop.io.erasurecode.ErasureCodeConstants;
+import org.apache.hadoop.io.erasurecode.ErasureCoderOptions;
 import org.apache.hadoop.io.erasurecode.rawcoder.RawErasureDecoder;
 
 /**
@@ -30,21 +31,17 @@ import org.apache.hadoop.io.erasurecode.rawcoder.RawErasureDecoder;
  * It implements {@link ErasureCoder}.
  */
 @InterfaceAudience.Private
-public class XORErasureDecoder extends AbstractErasureDecoder {
+public class XORErasureDecoder extends ErasureDecoder {
 
-  public XORErasureDecoder(int numDataUnits, int numParityUnits) {
-    super(numDataUnits, numParityUnits);
-  }
-
-  public XORErasureDecoder(ECSchema schema) {
-    super(schema);
+  public XORErasureDecoder(ErasureCoderOptions options) {
+    super(options);
   }
 
   @Override
   protected ErasureCodingStep prepareDecodingStep(
       final ECBlockGroup blockGroup) {
-    RawErasureDecoder rawDecoder = CodecUtil.createXORRawDecoder(getConf(),
-        getNumDataUnits(), getNumParityUnits());
+    RawErasureDecoder rawDecoder = CodecUtil.createRawDecoder(getConf(),
+        ErasureCodeConstants.XOR_CODEC_NAME, getOptions());
 
     ECBlock[] inputBlocks = getInputBlocks(blockGroup);
 

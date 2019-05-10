@@ -22,6 +22,7 @@ import static org.apache.hadoop.test.MetricsAsserts.getMetrics;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.ArgumentMatchers.any;
 
 import com.google.common.base.Supplier;
 
@@ -33,8 +34,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.TimeoutException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -54,10 +55,9 @@ import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
 import org.apache.hadoop.hdfs.server.datanode.FsDatasetTestUtils.MaterializedReplica;
+import org.apache.hadoop.hdfs.server.datanode.InternalDataNodeTestUtils;
 import org.apache.hadoop.hdfs.server.datanode.SimulatedFSDataset;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
-import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
-import org.apache.hadoop.hdfs.server.protocol.StorageReceivedDeletedBlocks;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.metrics2.MetricsRecordBuilder;
 import org.apache.hadoop.test.GenericTestUtils;
@@ -77,8 +77,8 @@ public class TestReplication {
     "/d1/r1", "/d1/r1", "/d1/r2", "/d1/r2", "/d1/r2", "/d2/r3", "/d2/r3"
   };
   private static final int numDatanodes = racks.length;
-  private static final Log LOG = LogFactory.getLog(
-                                       "org.apache.hadoop.hdfs.TestReplication");
+  private static final Logger LOG = LoggerFactory.getLogger(
+                                       TestReplication.class);
   
   /* check if there are at least two nodes are on the same rack */
   private void checkFile(FileSystem fileSys, Path name, int repl)
@@ -227,7 +227,8 @@ public class TestReplication {
    */
   public void runReplication(boolean simulated) throws IOException {
     Configuration conf = new HdfsConfiguration();
-    conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_REPLICATION_CONSIDERLOAD_KEY, false);
+    conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_CONSIDERLOAD_KEY,
+        false);
     if (simulated) {
       SimulatedFSDataset.setFactory(conf);
     }
@@ -571,12 +572,12 @@ public class TestReplication {
       NameNode nn = cluster.getNameNode();
       DataNode dn = cluster.getDataNodes().get(0);
       DatanodeProtocolClientSideTranslatorPB spy =
-          DataNodeTestUtils.spyOnBposToNN(dn, nn);
+          InternalDataNodeTestUtils.spyOnBposToNN(dn, nn);
       DelayAnswer delayer = new GenericTestUtils.DelayAnswer(LOG);
       Mockito.doAnswer(delayer).when(spy).blockReceivedAndDeleted(
-          Mockito.<DatanodeRegistration>anyObject(),
+          any(),
           Mockito.anyString(),
-          Mockito.<StorageReceivedDeletedBlocks[]>anyObject());
+          any());
 
       FileSystem fs = cluster.getFileSystem();
       // Create and close a small file with two blocks

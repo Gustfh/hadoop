@@ -17,12 +17,13 @@
  */
 package org.apache.hadoop.hdfs;
 
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IPC_CLIENT_CONNECT_MAX_RETRIES_KEY;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Matchers.anyLong;
-import static org.mockito.Matchers.anyObject;
-import static org.mockito.Matchers.anyString;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.spy;
 
@@ -31,15 +32,14 @@ import java.io.OutputStream;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
-import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
@@ -56,7 +56,7 @@ import org.junit.Test;
  *  using append()/sync() to recover block information
  */
 public class TestFileAppend4 {
-  static final Log LOG = LogFactory.getLog(TestFileAppend4.class);
+  static final Logger LOG = LoggerFactory.getLogger(TestFileAppend4.class);
   static final long BLOCK_SIZE = 1024;
   static final long BBW_SIZE = 500; // don't align on bytes/checksum
 
@@ -85,11 +85,11 @@ public class TestFileAppend4 {
     // handle under-replicated blocks quickly (for replication asserts)
     conf.setInt(
         DFSConfigKeys.DFS_NAMENODE_RECONSTRUCTION_PENDING_TIMEOUT_SEC_KEY, 5);
-    conf.setInt(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 1);
+    conf.setInt(DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_KEY, 1);
     
     // handle failures in the DFSClient pipeline quickly
     // (for cluster.shutdown(); fs.close() idiom)
-    conf.setInt("ipc.client.connect.max.retries", 1);
+    conf.setInt(IPC_CLIENT_CONNECT_MAX_RETRIES_KEY, 1);
   }
   
   /*
@@ -153,7 +153,7 @@ public class TestFileAppend4 {
       // Delay completeFile
       GenericTestUtils.DelayAnswer delayer = new GenericTestUtils.DelayAnswer(LOG);
       doAnswer(delayer).when(spyNN).complete(
-          anyString(), anyString(), (ExtendedBlock)anyObject(), anyLong());
+          anyString(), anyString(), any(), anyLong());
  
       DFSClient client = new DFSClient(null, spyNN, conf, null);
       file1 = new Path("/testRecoverFinalized");
@@ -224,7 +224,7 @@ public class TestFileAppend4 {
       GenericTestUtils.DelayAnswer delayer =
         new GenericTestUtils.DelayAnswer(LOG);
       doAnswer(delayer).when(spyNN).complete(anyString(), anyString(),
-          (ExtendedBlock) anyObject(), anyLong());
+          any(), anyLong());
  
       DFSClient client = new DFSClient(null, spyNN, conf, null);
       file1 = new Path("/testCompleteOtherLease");

@@ -23,7 +23,10 @@ import org.apache.hadoop.ha.HAServiceProtocol;
 import org.apache.hadoop.ha.ZKFCProtocol;
 import org.apache.hadoop.hdfs.protocol.ClientDatanodeProtocol;
 import org.apache.hadoop.hdfs.protocol.ClientProtocol;
+import org.apache.hadoop.hdfs.protocol.ReconfigurationProtocol;
+import org.apache.hadoop.hdfs.qjournal.protocol.InterQJournalProtocol;
 import org.apache.hadoop.hdfs.qjournal.protocol.QJournalProtocol;
+import org.apache.hadoop.hdfs.server.protocol.DatanodeLifelineProtocol;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeProtocol;
 import org.apache.hadoop.hdfs.server.protocol.InterDatanodeProtocol;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocol;
@@ -55,6 +58,9 @@ public class HDFSPolicyProvider extends PolicyProvider {
         NamenodeProtocol.class),
     new Service(CommonConfigurationKeys.SECURITY_QJOURNAL_SERVICE_PROTOCOL_ACL,
         QJournalProtocol.class),
+        new Service(
+            CommonConfigurationKeys.SECURITY_INTERQJOURNAL_SERVICE_PROTOCOL_ACL,
+            InterQJournalProtocol.class),
     new Service(CommonConfigurationKeys.SECURITY_HA_SERVICE_PROTOCOL_ACL,
         HAServiceProtocol.class),
     new Service(CommonConfigurationKeys.SECURITY_ZKFC_PROTOCOL_ACL,
@@ -76,7 +82,13 @@ public class HDFSPolicyProvider extends PolicyProvider {
         GenericRefreshProtocol.class),
     new Service(
         CommonConfigurationKeys.HADOOP_SECURITY_SERVICE_AUTHORIZATION_TRACING,
-        TraceAdminProtocol.class)
+        TraceAdminProtocol.class),
+    new Service(
+        CommonConfigurationKeys.HADOOP_SECURITY_SERVICE_AUTHORIZATION_DATANODE_LIFELINE,
+        DatanodeLifelineProtocol.class),
+    new Service(
+          CommonConfigurationKeys.HADOOP_SECURITY_SERVICE_AUTHORIZATION_RECONFIGURATION,
+          ReconfigurationProtocol.class)
   };
   
   @Override

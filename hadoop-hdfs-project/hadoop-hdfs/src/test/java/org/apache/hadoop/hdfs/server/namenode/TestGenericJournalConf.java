@@ -155,7 +155,7 @@ public class TestGenericJournalConf {
     }
     
     @Override
-    public void format(NamespaceInfo nsInfo) throws IOException {
+    public void format(NamespaceInfo nsInfo, boolean force) throws IOException {
       formatCalled = true;
     }
     
@@ -173,7 +173,7 @@ public class TestGenericJournalConf {
 
     @Override
     public void selectInputStreams(Collection<EditLogInputStream> streams,
-        long fromTxnId, boolean inProgressOk) {
+        long fromTxnId, boolean inProgressOk, boolean onlyDurableTxns) {
     }
 
     @Override

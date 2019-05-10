@@ -76,7 +76,7 @@
 #export YARN_NODEMANAGER_OPTS=
 
 ###
-# TimeLineServer specifc parameters
+# TimeLineServer specific parameters
 ###
 
 # Specify the max heapsize for the timelineserver.  If no units are
@@ -93,6 +93,18 @@
 # See ResourceManager for some examples
 #
 #export YARN_TIMELINESERVER_OPTS=
+
+###
+# TimeLineReader specific parameters
+###
+
+# Specify the JVM options to be used when starting the TimeLineReader.
+# These options will be appended to the options specified as HADOOP_OPTS
+# and therefore may override any similar flags set in HADOOP_OPTS
+#
+# See ResourceManager for some examples
+#
+#export YARN_TIMELINEREADER_OPTS=
 
 ###
 # Web App Proxy Server specifc parameters
@@ -124,3 +136,35 @@
 # See ResourceManager for some examples
 #
 #export YARN_SHAREDCACHEMANAGER_OPTS=
+
+###
+# Router specific parameters
+###
+
+# Specify the JVM options to be used when starting the Router.
+# These options will be appended to the options specified as HADOOP_OPTS
+# and therefore may override any similar flags set in HADOOP_OPTS
+#
+# See ResourceManager for some examples
+#
+#export YARN_ROUTER_OPTS=
+
+###
+# Registry DNS specific parameters
+# This is deprecated and should be done in hadoop-env.sh
+###
+# For privileged registry DNS, user to run as after dropping privileges
+# This will replace the hadoop.id.str Java property in secure mode.
+# export YARN_REGISTRYDNS_SECURE_USER=yarn
+
+# Supplemental options for privileged registry DNS
+# By default, Hadoop uses jsvc which needs to know to launch a
+# server jvm.
+# export YARN_REGISTRYDNS_SECURE_EXTRA_OPTS="-jvm server"
+
+###
+# YARN Services parameters
+###
+# Directory containing service examples
+# export YARN_SERVICE_EXAMPLES_DIR = $HADOOP_YARN_HOME/share/hadoop/yarn/yarn-service-examples
+# export YARN_CONTAINER_RUNTIME_DOCKER_RUN_OVERRIDE_DISABLE=true

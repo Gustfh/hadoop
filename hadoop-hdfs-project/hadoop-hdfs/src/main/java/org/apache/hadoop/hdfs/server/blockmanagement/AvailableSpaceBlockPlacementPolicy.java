@@ -21,21 +21,26 @@ package org.apache.hadoop.hdfs.server.blockmanagement;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_AVAILABLE_SPACE_BLOCK_PLACEMENT_POLICY_BALANCED_SPACE_PREFERENCE_FRACTION_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_AVAILABLE_SPACE_BLOCK_PLACEMENT_POLICY_BALANCED_SPACE_PREFERENCE_FRACTION_DEFAULT;
 
+import java.util.Collection;
 import java.util.Random;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import com.google.common.base.Preconditions;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.net.DFSNetworkTopology;
 import org.apache.hadoop.net.NetworkTopology;
+import org.apache.hadoop.net.Node;
 
 /**
  * Space balanced block placement policy.
  */
 public class AvailableSpaceBlockPlacementPolicy extends
     BlockPlacementPolicyDefault {
-  private static final Log LOG = LogFactory
-      .getLog(AvailableSpaceBlockPlacementPolicy.class);
+  private static final Logger LOG = LoggerFactory
+      .getLogger(AvailableSpaceBlockPlacementPolicy.class);
   private static final Random RAND = new Random();
   private int balancedPreference =
       (int) (100 * DFS_NAMENODE_AVAILABLE_SPACE_BLOCK_PLACEMENT_POLICY_BALANCED_SPACE_PREFERENCE_FRACTION_DEFAULT);
@@ -68,16 +73,41 @@ public class AvailableSpaceBlockPlacementPolicy extends
   }
 
   @Override
-  protected DatanodeDescriptor chooseDataNode(String scope) {
-    DatanodeDescriptor a = (DatanodeDescriptor) clusterMap.chooseRandom(scope);
-    DatanodeDescriptor b = (DatanodeDescriptor) clusterMap.chooseRandom(scope);
-    int ret = compareDataNode(a, b);
-    if (ret == 0) {
-      return a;
-    } else if (ret < 0) {
-      return (RAND.nextInt(100) < balancedPreference) ? a : b;
+  protected DatanodeDescriptor chooseDataNode(final String scope,
+      final Collection<Node> excludedNode, StorageType type) {
+    // only the code that uses DFSNetworkTopology should trigger this code path.
+    Preconditions.checkArgument(clusterMap instanceof DFSNetworkTopology);
+    DFSNetworkTopology dfsClusterMap = (DFSNetworkTopology)clusterMap;
+    DatanodeDescriptor a = (DatanodeDescriptor) dfsClusterMap
+        .chooseRandomWithStorageType(scope, excludedNode, type);
+    DatanodeDescriptor b = (DatanodeDescriptor) dfsClusterMap
+        .chooseRandomWithStorageType(scope, excludedNode, type);
+    return select(a, b);
+  }
+
+  @Override
+  protected DatanodeDescriptor chooseDataNode(final String scope,
+      final Collection<Node> excludedNode) {
+    DatanodeDescriptor a =
+        (DatanodeDescriptor) clusterMap.chooseRandom(scope, excludedNode);
+    DatanodeDescriptor b =
+        (DatanodeDescriptor) clusterMap.chooseRandom(scope, excludedNode);
+    return select(a, b);
+  }
+
+  private DatanodeDescriptor select(
+      DatanodeDescriptor a, DatanodeDescriptor b) {
+    if (a != null && b != null){
+      int ret = compareDataNode(a, b);
+      if (ret == 0) {
+        return a;
+      } else if (ret < 0) {
+        return (RAND.nextInt(100) < balancedPreference) ? a : b;
+      } else {
+        return (RAND.nextInt(100) < balancedPreference) ? b : a;
+      }
     } else {
-      return (RAND.nextInt(100) < balancedPreference) ? b : a;
+      return a == null ? b : a;
     }
   }
 

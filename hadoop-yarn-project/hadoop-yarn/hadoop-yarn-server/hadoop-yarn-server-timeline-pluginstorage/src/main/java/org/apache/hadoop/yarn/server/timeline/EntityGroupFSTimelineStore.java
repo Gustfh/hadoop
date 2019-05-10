@@ -17,6 +17,11 @@
 
 package org.apache.hadoop.yarn.server.timeline;
 
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.databind.MappingJsonFactory;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.type.TypeFactory;
+import com.fasterxml.jackson.module.jaxb.JaxbAnnotationIntrospector;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -29,6 +34,7 @@ import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.service.CompositeService;
 import org.apache.hadoop.service.ServiceOperations;
 import org.apache.hadoop.ipc.CallerContext;
+import org.apache.hadoop.util.ApplicationClassLoader;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.Time;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
@@ -48,17 +54,17 @@ import org.apache.hadoop.yarn.exceptions.ApplicationNotFoundException;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.server.timeline.TimelineDataManager.CheckAcl;
 import org.apache.hadoop.yarn.server.timeline.security.TimelineACLsManager;
-import org.apache.hadoop.yarn.util.ConverterUtils;
-import org.codehaus.jackson.JsonFactory;
-import org.codehaus.jackson.map.MappingJsonFactory;
-import org.codehaus.jackson.map.ObjectMapper;
-import org.codehaus.jackson.xc.JaxbAnnotationIntrospector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.lang.reflect.UndeclaredThrowableException;
+import java.net.MalformedURLException;
+import java.security.AccessController;
+import java.security.PrivilegedActionException;
+import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumSet;
@@ -108,6 +114,10 @@ public class EntityGroupFSTimelineStore extends CompositeService
           + "%04d" + Path.SEPARATOR // app num / 1,000,000
           + "%03d" + Path.SEPARATOR // (app num / 1000) % 1000
           + "%s" + Path.SEPARATOR; // full app id
+  // Indicates when to force release a cache item even if there are active
+  // readers. Enlarge this factor may increase memory usage for the reader since
+  // there may be more cache items "hanging" in memory but not in cache.
+  private static final int CACHE_ITEM_OVERFLOW_FACTOR = 2;
 
   private YarnClient yarnClient;
   private TimelineStore summaryStore;
@@ -128,12 +138,17 @@ public class EntityGroupFSTimelineStore extends CompositeService
   private List<TimelineEntityGroupPlugin> cacheIdPlugins;
   private Map<TimelineEntityGroupId, EntityCacheItem> cachedLogs;
 
+  @VisibleForTesting
+  @InterfaceAudience.Private
+  EntityGroupFSTimelineStoreMetrics metrics;
+
   public EntityGroupFSTimelineStore() {
     super(EntityGroupFSTimelineStore.class.getSimpleName());
   }
 
   @Override
   protected void serviceInit(Configuration conf) throws Exception {
+    metrics = EntityGroupFSTimelineStoreMetrics.create();
     summaryStore = createSummaryStore();
     addService(summaryStore);
 
@@ -167,10 +182,12 @@ public class EntityGroupFSTimelineStore extends CompositeService
               TimelineEntityGroupId groupId = eldest.getKey();
               LOG.debug("Evicting {} due to space limitations", groupId);
               EntityCacheItem cacheItem = eldest.getValue();
-              cacheItem.releaseCache(groupId);
+              LOG.debug("Force release cache {}.", groupId);
+              cacheItem.forceRelease();
               if (cacheItem.getAppLogs().isDone()) {
                 appIdLogMap.remove(groupId.getApplicationId());
               }
+              metrics.incrCacheEvicts();
               return true;
             }
             return false;
@@ -199,25 +216,46 @@ public class EntityGroupFSTimelineStore extends CompositeService
       throws RuntimeException {
     Collection<String> pluginNames = conf.getTrimmedStringCollection(
         YarnConfiguration.TIMELINE_SERVICE_ENTITY_GROUP_PLUGIN_CLASSES);
+
+    String pluginClasspath = conf.getTrimmed(
+        YarnConfiguration.TIMELINE_SERVICE_ENTITY_GROUP_PLUGIN_CLASSPATH);
+    String[] systemClasses = conf.getTrimmedStrings(
+        YarnConfiguration.TIMELINE_SERVICE_ENTITY_GROUP_PLUGIN_SYSTEM_CLASSES);
+
     List<TimelineEntityGroupPlugin> pluginList
         = new LinkedList<TimelineEntityGroupPlugin>();
-    Exception caught = null;
+    ClassLoader customClassLoader = null;
+    if (pluginClasspath != null && pluginClasspath.length() > 0) {
+      try {
+        customClassLoader = createPluginClassLoader(pluginClasspath,
+            systemClasses);
+      } catch (IOException ioe) {
+        LOG.warn("Error loading classloader", ioe);
+      }
+    }
     for (final String name : pluginNames) {
       LOG.debug("Trying to load plugin class {}", name);
       TimelineEntityGroupPlugin cacheIdPlugin = null;
+
       try {
-        Class<?> clazz = conf.getClassByName(name);
-        cacheIdPlugin =
-            (TimelineEntityGroupPlugin) ReflectionUtils.newInstance(
-                clazz, conf);
+        if (customClassLoader != null) {
+          LOG.debug("Load plugin {} with classpath: {}", name, pluginClasspath);
+          Class<?> clazz = Class.forName(name, true, customClassLoader);
+          Class<? extends TimelineEntityGroupPlugin> sClass = clazz.asSubclass(
+              TimelineEntityGroupPlugin.class);
+          cacheIdPlugin = ReflectionUtils.newInstance(sClass, conf);
+        } else {
+          LOG.debug("Load plugin class with system classpath");
+          Class<?> clazz = conf.getClassByName(name);
+          cacheIdPlugin =
+              (TimelineEntityGroupPlugin) ReflectionUtils.newInstance(
+                  clazz, conf);
+        }
       } catch (Exception e) {
         LOG.warn("Error loading plugin " + name, e);
-        caught = e;
+        throw new RuntimeException("No class defined for " + name, e);
       }
 
-      if (cacheIdPlugin == null) {
-        throw new RuntimeException("No class defined for " + name, caught);
-      }
       LOG.info("Load plugin class {}", cacheIdPlugin.getClass().getName());
       pluginList.add(cacheIdPlugin);
     }
@@ -256,7 +294,8 @@ public class EntityGroupFSTimelineStore extends CompositeService
     }
 
     objMapper = new ObjectMapper();
-    objMapper.setAnnotationIntrospector(new JaxbAnnotationIntrospector());
+    objMapper.setAnnotationIntrospector(
+        new JaxbAnnotationIntrospector(TypeFactory.defaultInstance()));
     jsonFactory = new MappingJsonFactory(objMapper);
     final long scanIntervalSecs = conf.getLong(
         YarnConfiguration
@@ -316,7 +355,14 @@ public class EntityGroupFSTimelineStore extends CompositeService
   @InterfaceAudience.Private
   @VisibleForTesting
   int scanActiveLogs() throws IOException {
-    RemoteIterator<FileStatus> iter = list(activeRootPath);
+    long startTime = Time.monotonicNow();
+    int logsToScanCount = scanActiveLogs(activeRootPath);
+    metrics.addActiveLogDirScanTime(Time.monotonicNow() - startTime);
+    return logsToScanCount;
+  }
+
+  int scanActiveLogs(Path dir) throws IOException {
+    RemoteIterator<FileStatus> iter = list(dir);
     int logsToScanCount = 0;
     while (iter.hasNext()) {
       FileStatus stat = iter.next();
@@ -328,7 +374,7 @@ public class EntityGroupFSTimelineStore extends CompositeService
         AppLogs logs = getAndSetActiveLog(appId, stat.getPath());
         executor.execute(new ActiveLogParser(logs));
       } else {
-        LOG.debug("Unable to parse entry {}", name);
+        logsToScanCount += scanActiveLogs(stat.getPath());
       }
     }
     return logsToScanCount;
@@ -377,6 +423,18 @@ public class EntityGroupFSTimelineStore extends CompositeService
         appDirPath = getActiveAppPath(applicationId);
         if (fs.exists(appDirPath)) {
           appState = AppState.ACTIVE;
+        } else {
+          // check for user directory inside active path
+          RemoteIterator<FileStatus> iter = list(activeRootPath);
+          while (iter.hasNext()) {
+            Path child = new Path(iter.next().getPath().getName(),
+                applicationId.toString());
+            appDirPath = new Path(activeRootPath, child);
+            if (fs.exists(appDirPath)) {
+              appState = AppState.ACTIVE;
+              break;
+            }
+          }
         }
       }
       if (appState != AppState.UNKNOWN) {
@@ -423,6 +481,7 @@ public class EntityGroupFSTimelineStore extends CompositeService
               if (!fs.delete(dirpath, true)) {
                 LOG.error("Unable to remove " + dirpath);
               }
+              metrics.incrLogsDirsCleaned();
             } catch (IOException e) {
               LOG.error("Unable to remove " + dirpath, e);
             }
@@ -460,12 +519,35 @@ public class EntityGroupFSTimelineStore extends CompositeService
     ApplicationId appId = null;
     if (appIdStr.startsWith(ApplicationId.appIdStrPrefix)) {
       try {
-        appId = ConverterUtils.toApplicationId(appIdStr);
+        appId = ApplicationId.fromString(appIdStr);
       } catch (IllegalArgumentException e) {
         appId = null;
       }
     }
     return appId;
+  }
+
+  private static ClassLoader createPluginClassLoader(
+      final String appClasspath, final String[] systemClasses)
+      throws IOException {
+    try {
+      return AccessController.doPrivileged(
+        new PrivilegedExceptionAction<ClassLoader>() {
+          @Override
+          public ClassLoader run() throws MalformedURLException {
+            return new ApplicationClassLoader(appClasspath,
+                EntityGroupFSTimelineStore.class.getClassLoader(),
+                Arrays.asList(systemClasses));
+          }
+        }
+      );
+    } catch (PrivilegedActionException e) {
+      Throwable t = e.getCause();
+      if (t instanceof MalformedURLException) {
+        throw (MalformedURLException) t;
+      }
+      throw new IOException(e);
+    }
   }
 
   private Path getActiveAppPath(ApplicationId appId) {
@@ -508,6 +590,15 @@ public class EntityGroupFSTimelineStore extends CompositeService
   @VisibleForTesting
   protected AppState getAppState(ApplicationId appId) throws IOException {
     return getAppState(appId, yarnClient);
+  }
+
+  /**
+   * Get all plugins for tests.
+   * @return all plugins
+   */
+  @VisibleForTesting
+  List<TimelineEntityGroupPlugin> getPlugins() {
+    return cacheIdPlugins;
   }
 
   /**
@@ -588,6 +679,7 @@ public class EntityGroupFSTimelineStore extends CompositeService
     @VisibleForTesting
     synchronized void parseSummaryLogs(TimelineDataManager tdm)
         throws IOException {
+      long startTime = Time.monotonicNow();
       if (!isDone()) {
         LOG.debug("Try to parse summary log for log {} in {}",
             appId, appDirPath);
@@ -605,8 +697,10 @@ public class EntityGroupFSTimelineStore extends CompositeService
       List<LogInfo> removeList = new ArrayList<LogInfo>();
       for (LogInfo log : summaryLogs) {
         if (fs.exists(log.getPath(appDirPath))) {
-          log.parseForStore(tdm, appDirPath, isDone(), jsonFactory,
+          long summaryEntityParsed
+              = log.parseForStore(tdm, appDirPath, isDone(), jsonFactory,
               objMapper, fs);
+          metrics.incrEntitiesReadToSummary(summaryEntityParsed);
         } else {
           // The log may have been removed, remove the log
           removeList.add(log);
@@ -615,6 +709,7 @@ public class EntityGroupFSTimelineStore extends CompositeService
         }
       }
       summaryLogs.removeAll(removeList);
+      metrics.addSummaryLogReadTime(Time.monotonicNow() - startTime);
     }
 
     // scans for new logs and returns the modification timestamp of the
@@ -691,8 +786,8 @@ public class EntityGroupFSTimelineStore extends CompositeService
       summaryLogs.add(log);
     }
 
-    private void addDetailLog(String attemptDirName, String filename,
-        String owner) {
+    private synchronized void addDetailLog(String attemptDirName,
+        String filename, String owner) {
       for (LogInfo log : detailLogs) {
         if (log.getFilename().equals(filename)
             && log.getAttemptDirName().equals(attemptDirName)) {
@@ -700,6 +795,30 @@ public class EntityGroupFSTimelineStore extends CompositeService
         }
       }
       detailLogs.add(new EntityLogInfo(attemptDirName, filename, owner));
+    }
+
+    synchronized void loadDetailLog(TimelineDataManager tdm,
+        TimelineEntityGroupId groupId) throws IOException {
+      List<LogInfo> removeList = new ArrayList<>();
+      for (LogInfo log : detailLogs) {
+        LOG.debug("Try refresh logs for {}", log.getFilename());
+        // Only refresh the log that matches the cache id
+        if (log.matchesGroupId(groupId)) {
+          Path dirPath = getAppDirPath();
+          if (fs.exists(log.getPath(dirPath))) {
+            LOG.debug("Refresh logs for cache id {}", groupId);
+            log.parseForStore(tdm, dirPath, isDone(),
+                jsonFactory, objMapper, fs);
+          } else {
+            // The log may have been removed, remove the log
+            removeList.add(log);
+            LOG.info(
+                "File {} no longer exists, removing it from log list",
+                log.getPath(dirPath));
+          }
+        }
+      }
+      detailLogs.removeAll(removeList);
     }
 
     public synchronized void moveToDone() throws IOException {
@@ -787,6 +906,7 @@ public class EntityGroupFSTimelineStore extends CompositeService
     @Override
     public void run() {
       LOG.debug("Cleaner starting");
+      long startTime = Time.monotonicNow();
       try {
         cleanLogs(doneRootPath, fs, logRetainMillis);
       } catch (Exception e) {
@@ -796,6 +916,8 @@ public class EntityGroupFSTimelineStore extends CompositeService
         } else {
           LOG.error("Error cleaning files", e);
         }
+      } finally {
+        metrics.addLogCleanTime(Time.monotonicNow() - startTime);
       }
       LOG.debug("Cleaner finished");
     }
@@ -814,27 +936,31 @@ public class EntityGroupFSTimelineStore extends CompositeService
   }
 
   private List<TimelineStore> getTimelineStoresFromCacheIds(
-      Set<TimelineEntityGroupId> groupIds, String entityType)
+      Set<TimelineEntityGroupId> groupIds, String entityType,
+      List<EntityCacheItem> cacheItems)
       throws IOException {
     List<TimelineStore> stores = new LinkedList<TimelineStore>();
     // For now we just handle one store in a context. We return the first
     // non-null storage for the group ids.
     for (TimelineEntityGroupId groupId : groupIds) {
-      TimelineStore storeForId = getCachedStore(groupId);
+      TimelineStore storeForId = getCachedStore(groupId, cacheItems);
       if (storeForId != null) {
         LOG.debug("Adding {} as a store for the query", storeForId.getName());
         stores.add(storeForId);
+        metrics.incrGetEntityToDetailOps();
       }
     }
     if (stores.size() == 0) {
       LOG.debug("Using summary store for {}", entityType);
       stores.add(this.summaryStore);
+      metrics.incrGetEntityToSummaryOps();
     }
     return stores;
   }
 
-  private List<TimelineStore> getTimelineStoresForRead(String entityId,
-      String entityType) throws IOException {
+  protected List<TimelineStore> getTimelineStoresForRead(String entityId,
+      String entityType, List<EntityCacheItem> cacheItems)
+      throws IOException {
     Set<TimelineEntityGroupId> groupIds = new HashSet<TimelineEntityGroupId>();
     for (TimelineEntityGroupPlugin cacheIdPlugin : cacheIdPlugins) {
       LOG.debug("Trying plugin {} for id {} and type {}",
@@ -853,12 +979,12 @@ public class EntityGroupFSTimelineStore extends CompositeService
             cacheIdPlugin.getClass().getName());
       }
     }
-    return getTimelineStoresFromCacheIds(groupIds, entityType);
+    return getTimelineStoresFromCacheIds(groupIds, entityType, cacheItems);
   }
 
   private List<TimelineStore> getTimelineStoresForRead(String entityType,
-      NameValuePair primaryFilter, Collection<NameValuePair> secondaryFilters)
-      throws IOException {
+      NameValuePair primaryFilter, Collection<NameValuePair> secondaryFilters,
+      List<EntityCacheItem> cacheItems) throws IOException {
     Set<TimelineEntityGroupId> groupIds = new HashSet<TimelineEntityGroupId>();
     for (TimelineEntityGroupPlugin cacheIdPlugin : cacheIdPlugins) {
       Set<TimelineEntityGroupId> idsFromPlugin =
@@ -870,19 +996,19 @@ public class EntityGroupFSTimelineStore extends CompositeService
         groupIds.addAll(idsFromPlugin);
       }
     }
-    return getTimelineStoresFromCacheIds(groupIds, entityType);
+    return getTimelineStoresFromCacheIds(groupIds, entityType, cacheItems);
   }
 
   // find a cached timeline store or null if it cannot be located
-  private TimelineStore getCachedStore(TimelineEntityGroupId groupId)
-      throws IOException {
+  private TimelineStore getCachedStore(TimelineEntityGroupId groupId,
+      List<EntityCacheItem> cacheItems) throws IOException {
     EntityCacheItem cacheItem;
     synchronized (this.cachedLogs) {
       // Note that the content in the cache log storage may be stale.
       cacheItem = this.cachedLogs.get(groupId);
       if (cacheItem == null) {
         LOG.debug("Set up new cache item for id {}", groupId);
-        cacheItem = new EntityCacheItem(getConfig(), fs);
+        cacheItem = new EntityCacheItem(groupId, getConfig());
         AppLogs appLogs = getAndSetAppLogs(groupId.getApplicationId());
         if (appLogs != null) {
           LOG.debug("Set applogs {} for group id {}", appLogs, groupId);
@@ -897,8 +1023,8 @@ public class EntityGroupFSTimelineStore extends CompositeService
     if (cacheItem.getAppLogs() != null) {
       AppLogs appLogs = cacheItem.getAppLogs();
       LOG.debug("try refresh cache {} {}", groupId, appLogs.getAppId());
-      store = cacheItem.refreshCache(groupId, aclManager, jsonFactory,
-          objMapper);
+      cacheItems.add(cacheItem);
+      store = cacheItem.refreshCache(aclManager, metrics);
     } else {
       LOG.warn("AppLogs for group id {} is null", groupId);
     }
@@ -911,15 +1037,18 @@ public class EntityGroupFSTimelineStore extends CompositeService
       NameValuePair primaryFilter, Collection<NameValuePair> secondaryFilters,
       EnumSet<Field> fieldsToRetrieve, CheckAcl checkAcl) throws IOException {
     LOG.debug("getEntities type={} primary={}", entityType, primaryFilter);
+    List<EntityCacheItem> relatedCacheItems = new ArrayList<>();
     List<TimelineStore> stores = getTimelineStoresForRead(entityType,
-        primaryFilter, secondaryFilters);
+        primaryFilter, secondaryFilters, relatedCacheItems);
     TimelineEntities returnEntities = new TimelineEntities();
     for (TimelineStore store : stores) {
       LOG.debug("Try timeline store {} for the request", store.getName());
-      returnEntities.addEntities(
-          store.getEntities(entityType, limit, windowStart, windowEnd, fromId,
-              fromTs, primaryFilter, secondaryFilters, fieldsToRetrieve,
-              checkAcl).getEntities());
+      TimelineEntities entities = store.getEntities(entityType, limit,
+          windowStart, windowEnd, fromId, fromTs, primaryFilter,
+          secondaryFilters, fieldsToRetrieve, checkAcl);
+      if (entities != null) {
+        returnEntities.addEntities(entities.getEntities());
+      }
     }
     return returnEntities;
   }
@@ -928,7 +1057,9 @@ public class EntityGroupFSTimelineStore extends CompositeService
   public TimelineEntity getEntity(String entityId, String entityType,
       EnumSet<Field> fieldsToRetrieve) throws IOException {
     LOG.debug("getEntity type={} id={}", entityType, entityId);
-    List<TimelineStore> stores = getTimelineStoresForRead(entityId, entityType);
+    List<EntityCacheItem> relatedCacheItems = new ArrayList<>();
+    List<TimelineStore> stores = getTimelineStoresForRead(entityId, entityType,
+        relatedCacheItems);
     for (TimelineStore store : stores) {
       LOG.debug("Try timeline store {}:{} for the request", store.getName(),
           store.toString());
@@ -948,10 +1079,11 @@ public class EntityGroupFSTimelineStore extends CompositeService
       Long windowEnd, Set<String> eventTypes) throws IOException {
     LOG.debug("getEntityTimelines type={} ids={}", entityType, entityIds);
     TimelineEvents returnEvents = new TimelineEvents();
+    List<EntityCacheItem> relatedCacheItems = new ArrayList<>();
     for (String entityId : entityIds) {
       LOG.debug("getEntityTimeline type={} id={}", entityType, entityId);
       List<TimelineStore> stores
-          = getTimelineStoresForRead(entityId, entityType);
+          = getTimelineStoresForRead(entityId, entityType, relatedCacheItems);
       for (TimelineStore store : stores) {
         LOG.debug("Try timeline store {}:{} for the request", store.getName(),
             store.toString());
@@ -960,7 +1092,9 @@ public class EntityGroupFSTimelineStore extends CompositeService
         TimelineEvents events =
             store.getEntityTimelines(entityType, entityIdSet, limit,
                 windowStart, windowEnd, eventTypes);
-        returnEvents.addEvents(events.getAllEvents());
+        if (events != null) {
+          returnEvents.addEvents(events.getAllEvents());
+        }
       }
     }
     return returnEvents;

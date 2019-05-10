@@ -53,14 +53,17 @@ public class AppInfo {
   protected String originalTrackingUrl;
   protected String trackingUrl;
   protected FinalApplicationStatus finalAppStatus;
-  protected long submittedTime;
+  private long submittedTime;
   protected long startedTime;
+  private long launchTime;
   protected long finishedTime;
   protected long elapsedTime;
   protected String applicationTags;
   protected int priority;
-  private int allocatedCpuVcores;
-  private int allocatedMemoryMB;
+  private long allocatedCpuVcores;
+  private long allocatedMemoryMB;
+  private long reservedCpuVcores;
+  private long reservedMemoryMB;
   protected boolean unmanagedApplication;
   private String appNodeLabelExpression;
   private String amNodeLabelExpression;
@@ -84,8 +87,9 @@ public class AppInfo {
     diagnosticsInfo = app.getDiagnostics();
     trackingUrl = app.getTrackingUrl();
     originalTrackingUrl = app.getOriginalTrackingUrl();
-    submittedTime = app.getStartTime();
+    submittedTime = app.getSubmitTime();
     startedTime = app.getStartTime();
+    launchTime = app.getLaunchTime();
     finishedTime = app.getFinishTime();
     elapsedTime = Times.elapsed(startedTime, finishedTime);
     finalAppStatus = app.getFinalApplicationStatus();
@@ -100,7 +104,11 @@ public class AppInfo {
         allocatedCpuVcores = app.getApplicationResourceUsageReport()
             .getUsedResources().getVirtualCores();
         allocatedMemoryMB = app.getApplicationResourceUsageReport()
-            .getUsedResources().getMemory();
+            .getUsedResources().getMemorySize();
+        reservedCpuVcores = app.getApplicationResourceUsageReport()
+            .getReservedResources().getVirtualCores();
+        reservedMemoryMB = app.getApplicationResourceUsageReport()
+            .getReservedResources().getMemorySize();
       }
     }
     progress = app.getProgress() * 100; // in percent
@@ -152,12 +160,20 @@ public class AppInfo {
     return runningContainers;
   }
 
-  public int getAllocatedCpuVcores() {
+  public long getAllocatedCpuVcores() {
     return allocatedCpuVcores;
   }
 
-  public int getAllocatedMemoryMB() {
+  public long getAllocatedMemoryMB() {
     return allocatedMemoryMB;
+  }
+
+  public long getReservedCpuVcores() {
+    return reservedCpuVcores;
+  }
+
+  public long getReservedMemoryMB() {
+    return reservedMemoryMB;
   }
 
   public float getProgress() {
@@ -182,6 +198,10 @@ public class AppInfo {
 
   public long getSubmittedTime() {
     return submittedTime;
+  }
+
+  public long getLaunchTime() {
+    return launchTime;
   }
 
   public long getStartedTime() {

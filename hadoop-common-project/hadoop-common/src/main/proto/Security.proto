@@ -36,6 +36,18 @@ message TokenProto {
   required bytes password = 2;
   required string kind = 3;
   required string service = 4;
+  optional bytes handshakeSecret = 5;
+}
+
+message CredentialsKVProto {
+  required string alias = 1;
+  optional hadoop.common.TokenProto token = 2;
+  optional bytes secret = 3;
+}
+
+message CredentialsProto {
+  repeated hadoop.common.CredentialsKVProto tokens = 1;
+  repeated hadoop.common.CredentialsKVProto secrets = 2;
 }
 
 message GetDelegationTokenRequestProto {

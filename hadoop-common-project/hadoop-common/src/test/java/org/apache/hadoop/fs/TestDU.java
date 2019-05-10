@@ -17,7 +17,12 @@
  */
 package org.apache.hadoop.fs;
 
-import junit.framework.TestCase;
+import org.apache.hadoop.util.Shell;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
+import static org.junit.Assert.*;
+import static org.junit.Assume.assumeFalse;
 
 import java.io.File;
 import java.io.IOException;
@@ -29,16 +34,17 @@ import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.test.GenericTestUtils;
 
 /** This test makes sure that "DU" does not get to run on each call to getUsed */
-public class TestDU extends TestCase {
+public class TestDU {
   final static private File DU_DIR = GenericTestUtils.getTestDir("dutmp");
 
-  @Override
+  @Before
   public void setUp() {
-      FileUtil.fullyDelete(DU_DIR);
-      assertTrue(DU_DIR.mkdirs());
+    assumeFalse(Shell.WINDOWS);
+    FileUtil.fullyDelete(DU_DIR);
+    assertTrue(DU_DIR.mkdirs());
   }
 
-  @Override
+  @After
   public void tearDown() throws IOException {
       FileUtil.fullyDelete(DU_DIR);
   }
@@ -69,6 +75,7 @@ public class TestDU extends TestCase {
    * @throws IOException
    * @throws InterruptedException
    */
+  @Test
   public void testDU() throws IOException, InterruptedException {
     final int writtenSize = 32*1024;   // writing 32K
     // Allow for extra 4K on-disk slack for local file systems
@@ -79,7 +86,7 @@ public class TestDU extends TestCase {
 
     Thread.sleep(5000); // let the metadata updater catch up
 
-    DU du = new DU(file, 10000, -1);
+    DU du = new DU(file, 10000, 0, -1);
     du.init();
     long duSize = du.getUsed();
     du.close();
@@ -89,7 +96,7 @@ public class TestDU extends TestCase {
         writtenSize <= (duSize + slack));
 
     //test with 0 interval, will not launch thread
-    du = new DU(file, 0, -1);
+    du = new DU(file, 0, 1, -1);
     du.init();
     duSize = du.getUsed();
     du.close();
@@ -99,7 +106,7 @@ public class TestDU extends TestCase {
         writtenSize <= (duSize + slack));
 
     //test without launching thread
-    du = new DU(file, 10000, -1);
+    du = new DU(file, 10000, 0, -1);
     du.init();
     duSize = du.getUsed();
 
@@ -107,21 +114,24 @@ public class TestDU extends TestCase {
         duSize >= writtenSize &&
         writtenSize <= (duSize + slack));
   }
+
+  @Test
   public void testDUGetUsedWillNotReturnNegative() throws IOException {
     File file = new File(DU_DIR, "data");
     assertTrue(file.createNewFile());
     Configuration conf = new Configuration();
     conf.setLong(CommonConfigurationKeys.FS_DU_INTERVAL_KEY, 10000L);
-    DU du = new DU(file, 10000L, -1);
+    DU du = new DU(file, 10000L, 0, -1);
     du.incDfsUsed(-Long.MAX_VALUE);
     long duSize = du.getUsed();
     assertTrue(String.valueOf(duSize), duSize >= 0L);
   }
 
+  @Test
   public void testDUSetInitialValue() throws IOException {
     File file = new File(DU_DIR, "dataX");
     createFile(file, 8192);
-    DU du = new DU(file, 3000, 1024);
+    DU du = new DU(file, 3000, 0, 1024);
     du.init();
     assertTrue("Initial usage setting not honored", du.getUsed() == 1024);
 

@@ -112,14 +112,14 @@ public class TestWorkPreservingRMRestartForNodeLabel {
     FiCaSchedulerApp app =
         cs.getSchedulerApplications().get(appId).getCurrentAppAttempt();
     Assert.assertEquals(expectedMemUsage, app.getAppAttemptResourceUsage()
-        .getUsed(partition).getMemory());
+        .getUsed(partition).getMemorySize());
   }
   
   private void checkQueueResourceUsage(String partition, String queueName, MockRM rm, int expectedMemUsage) {
     CapacityScheduler cs = (CapacityScheduler) rm.getResourceScheduler();
     CSQueue queue = cs.getQueue(queueName);
     Assert.assertEquals(expectedMemUsage, queue.getQueueResourceUsage()
-        .getUsed(partition).getMemory());
+        .getUsed(partition).getMemorySize());
   }
 
   @Test
@@ -133,21 +133,17 @@ public class TestWorkPreservingRMRestartForNodeLabel {
     mgr.addLabelsToNode(ImmutableMap.of(NodeId.newInstance("h1", 0), toSet("x"),
         NodeId.newInstance("h2", 0), toSet("y")));
 
-    MemoryRMStateStore memStore = new MemoryRMStateStore();
-    memStore.init(conf);
-    
     conf = TestUtils.getConfigurationWithDefaultQueueLabels(conf);
-    
+
     // inject node label manager
     MockRM rm1 =
-        new MockRM(conf,
-            memStore) {
+        new MockRM(conf) {
           @Override
           public RMNodeLabelsManager createNodeLabelManager() {
             return mgr;
           }
         };
-
+    MemoryRMStateStore memStore = (MemoryRMStateStore) rm1.getRMStateStore();
     rm1.getRMContext().setNodeLabelManager(mgr);
     rm1.start();
     MockNM nm1 = rm1.registerNode("h1:1234", 8000); // label = x

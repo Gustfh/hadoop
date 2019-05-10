@@ -28,16 +28,24 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock.ReadLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock.WriteLock;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import org.apache.commons.io.FileUtils;
-import org.apache.commons.lang.RandomStringUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.fs.FileAlreadyExistsException;
 import org.apache.hadoop.fs.FileContext;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
-import org.apache.hadoop.util.DiskChecker;
+import org.apache.hadoop.util.DiskValidator;
+import org.apache.hadoop.util.DiskValidatorFactory;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -45,8 +53,11 @@ import com.google.common.annotations.VisibleForTesting;
  * Manages a list of local storage directories.
  */
 public class DirectoryCollection {
-  private static final Log LOG = LogFactory.getLog(DirectoryCollection.class);
+  private static final Logger LOG =
+       LoggerFactory.getLogger(DirectoryCollection.class);
 
+  private final Configuration conf;
+  private final DiskValidator diskValidator;
   /**
    * The enum defines disk failure type.
    */
@@ -88,6 +99,11 @@ public class DirectoryCollection {
   private List<String> localDirs;
   private List<String> errorDirs;
   private List<String> fullDirs;
+  private Map<String, DiskErrorInformation> directoryErrorInfo;
+
+  // read/write lock for accessing above directories.
+  private final ReadLock readLock;
+  private final WriteLock writeLock;
 
   private int numFailures;
 
@@ -163,9 +179,24 @@ public class DirectoryCollection {
       float utilizationPercentageCutOffHigh,
       float utilizationPercentageCutOffLow,
       long utilizationSpaceCutOff) {
-    localDirs = new CopyOnWriteArrayList<String>(dirs);
-    errorDirs = new CopyOnWriteArrayList<String>();
-    fullDirs = new CopyOnWriteArrayList<String>();
+    conf = new YarnConfiguration();
+    try {
+      String diskValidatorName = conf.get(YarnConfiguration.DISK_VALIDATOR,
+          YarnConfiguration.DEFAULT_DISK_VALIDATOR);
+      diskValidator = DiskValidatorFactory.getInstance(diskValidatorName);
+      LOG.info("Disk Validator '" + diskValidatorName + "' is loaded.");
+    } catch (Exception e) {
+      throw new YarnRuntimeException(e);
+    }
+
+    localDirs = new CopyOnWriteArrayList<>(dirs);
+    errorDirs = new CopyOnWriteArrayList<>();
+    fullDirs = new CopyOnWriteArrayList<>();
+    directoryErrorInfo = new ConcurrentHashMap<>();
+
+    ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
+    this.readLock = lock.readLock();
+    this.writeLock = lock.writeLock();
 
     diskUtilizationPercentageCutoffHigh = Math.max(0.0F, Math.min(100.0F,
         utilizationPercentageCutOffHigh));
@@ -174,17 +205,18 @@ public class DirectoryCollection {
     diskUtilizationSpaceCutoff =
         utilizationSpaceCutOff < 0 ? 0 : utilizationSpaceCutOff;
 
-    dirsChangeListeners = new HashSet<DirsChangeListener>();
+    dirsChangeListeners = Collections.newSetFromMap(
+        new ConcurrentHashMap<DirsChangeListener, Boolean>());
   }
 
-  synchronized void registerDirsChangeListener(
+  void registerDirsChangeListener(
       DirsChangeListener listener) {
     if (dirsChangeListeners.add(listener)) {
       listener.onDirsChanged();
     }
   }
 
-  synchronized void deregisterDirsChangeListener(
+  void deregisterDirsChangeListener(
       DirsChangeListener listener) {
     dirsChangeListeners.remove(listener);
   }
@@ -192,31 +224,98 @@ public class DirectoryCollection {
   /**
    * @return the current valid directories 
    */
-  synchronized List<String> getGoodDirs() {
-    return Collections.unmodifiableList(localDirs);
+  List<String> getGoodDirs() {
+    this.readLock.lock();
+    try {
+      return Collections.unmodifiableList(localDirs);
+    } finally {
+      this.readLock.unlock();
+    }
   }
 
   /**
    * @return the failed directories
    */
-  synchronized List<String> getFailedDirs() {
-    return Collections.unmodifiableList(
-        DirectoryCollection.concat(errorDirs, fullDirs));
+  List<String> getFailedDirs() {
+    this.readLock.lock();
+    try {
+      return Collections.unmodifiableList(
+          DirectoryCollection.concat(errorDirs, fullDirs));
+    } finally {
+      this.readLock.unlock();
+    }
   }
 
   /**
    * @return the directories that have used all disk space
    */
+  List<String> getFullDirs() {
+    this.readLock.lock();
+    try {
+      return Collections.unmodifiableList(fullDirs);
+    } finally {
+      this.readLock.unlock();
+    }
+  }
 
-  synchronized List<String> getFullDirs() {
-    return fullDirs;
+  /**
+   * @return the directories that have errors - many not have appropriate permissions
+   * or other disk validation checks might have failed in {@link DiskValidator}
+   *
+   */
+  @InterfaceStability.Evolving
+  List<String> getErroredDirs() {
+    this.readLock.lock();
+    try {
+      return Collections.unmodifiableList(errorDirs);
+    } finally {
+      this.readLock.unlock();
+    }
   }
 
   /**
    * @return total the number of directory failures seen till now
    */
-  synchronized int getNumFailures() {
-    return numFailures;
+  int getNumFailures() {
+    this.readLock.lock();
+    try {
+      return numFailures;
+    }finally {
+      this.readLock.unlock();
+    }
+  }
+
+  /**
+   *
+   * @param dirName Absolute path of Directory for which error diagnostics are needed
+   * @return DiskErrorInformation - disk error diagnostics for the specified directory
+   *         null - the disk associated with the directory has passed disk utilization checks
+   *         /error validations in {@link DiskValidator}
+   *
+   */
+  @InterfaceStability.Evolving
+  DiskErrorInformation getDirectoryErrorInfo(String dirName) {
+    this.readLock.lock();
+    try {
+      return directoryErrorInfo.get(dirName);
+    } finally {
+      this.readLock.unlock();
+    }
+  }
+
+  /**
+   *
+   * @param dirName Absolute path of Directory for which the disk has been marked as unhealthy
+   * @return Check if disk associated with the directory is unhealthy
+   */
+  @InterfaceStability.Evolving
+  boolean isDiskUnHealthy(String dirName) {
+    this.readLock.lock();
+    try {
+      return directoryErrorInfo.containsKey(dirName);
+    } finally {
+      this.readLock.unlock();
+    }
   }
 
   /**
@@ -226,18 +325,33 @@ public class DirectoryCollection {
    * @param perm absolute permissions to use for any directories created
    * @return true if there were no errors, false if at least one error occurred
    */
-  synchronized boolean createNonExistentDirs(FileContext localFs,
+  boolean createNonExistentDirs(FileContext localFs,
       FsPermission perm) {
     boolean failed = false;
-    for (final String dir : localDirs) {
+    List<String> localDirectories = null;
+    this.readLock.lock();
+    try {
+      localDirectories = new ArrayList<>(localDirs);
+    } finally {
+      this.readLock.unlock();
+    }
+    for (final String dir : localDirectories) {
       try {
         createDir(localFs, new Path(dir), perm);
       } catch (IOException e) {
         LOG.warn("Unable to create directory " + dir + " error " +
             e.getMessage() + ", removing from the list of valid directories.");
-        localDirs.remove(dir);
-        errorDirs.add(dir);
-        numFailures++;
+        this.writeLock.lock();
+        try {
+          localDirs.remove(dir);
+          errorDirs.add(dir);
+          directoryErrorInfo.put(dir,
+              new DiskErrorInformation(DiskErrorCause.OTHER,
+                  "Cannot create directory : " + dir + ", error " + e.getMessage()));
+          numFailures++;
+        } finally {
+          this.writeLock.unlock();
+        }
         failed = true;
       }
     }
@@ -252,74 +366,97 @@ public class DirectoryCollection {
    *         checking or a failed directory passes the disk check <em>false</em>
    *         otherwise.
    */
-  synchronized boolean checkDirs() {
+  boolean checkDirs() {
     boolean setChanged = false;
-    Set<String> preCheckGoodDirs = new HashSet<String>(localDirs);
-    Set<String> preCheckFullDirs = new HashSet<String>(fullDirs);
-    Set<String> preCheckOtherErrorDirs = new HashSet<String>(errorDirs);
-    List<String> failedDirs = DirectoryCollection.concat(errorDirs, fullDirs);
-    List<String> allLocalDirs =
-        DirectoryCollection.concat(localDirs, failedDirs);
+    Set<String> preCheckGoodDirs = null;
+    Set<String> preCheckFullDirs = null;
+    Set<String> preCheckOtherErrorDirs = null;
+    List<String> failedDirs = null;
+    List<String> allLocalDirs = null;
+    this.readLock.lock();
+    try {
+      preCheckGoodDirs = new HashSet<String>(localDirs);
+      preCheckFullDirs = new HashSet<String>(fullDirs);
+      preCheckOtherErrorDirs = new HashSet<String>(errorDirs);
+      failedDirs = DirectoryCollection.concat(errorDirs, fullDirs);
+      allLocalDirs = DirectoryCollection.concat(localDirs, failedDirs);
+    } finally {
+      this.readLock.unlock();
+    }
 
+    // move testDirs out of any lock as it could wait for very long time in
+    // case of busy IO
     Map<String, DiskErrorInformation> dirsFailedCheck = testDirs(allLocalDirs,
         preCheckGoodDirs);
 
-    localDirs.clear();
-    errorDirs.clear();
-    fullDirs.clear();
+    this.writeLock.lock();
+    try {
+      localDirs.clear();
+      errorDirs.clear();
+      fullDirs.clear();
+      directoryErrorInfo.clear();
 
-    for (Map.Entry<String, DiskErrorInformation> entry : dirsFailedCheck
-      .entrySet()) {
-      String dir = entry.getKey();
-      DiskErrorInformation errorInformation = entry.getValue();
-      switch (entry.getValue().cause) {
-      case DISK_FULL:
-        fullDirs.add(entry.getKey());
-        break;
-      case OTHER:
-        errorDirs.add(entry.getKey());
-        break;
-      }
-      if (preCheckGoodDirs.contains(dir)) {
-        LOG.warn("Directory " + dir + " error, " + errorInformation.message
-            + ", removing from list of valid directories");
-        setChanged = true;
-        numFailures++;
-      }
-    }
-    for (String dir : allLocalDirs) {
-      if (!dirsFailedCheck.containsKey(dir)) {
-        localDirs.add(dir);
-        if (preCheckFullDirs.contains(dir)
-            || preCheckOtherErrorDirs.contains(dir)) {
+      for (Map.Entry<String, DiskErrorInformation> entry : dirsFailedCheck
+          .entrySet()) {
+        String dir = entry.getKey();
+        DiskErrorInformation errorInformation = entry.getValue();
+
+        switch (entry.getValue().cause) {
+        case DISK_FULL:
+          fullDirs.add(entry.getKey());
+          break;
+        case OTHER:
+          errorDirs.add(entry.getKey());
+          break;
+        default:
+          LOG.warn(entry.getValue().cause + " is unknown for disk error.");
+          break;
+        }
+        directoryErrorInfo.put(entry.getKey(), errorInformation);
+
+        if (preCheckGoodDirs.contains(dir)) {
+          LOG.warn("Directory " + dir + " error, " + errorInformation.message
+              + ", removing from list of valid directories");
           setChanged = true;
-          LOG.info("Directory " + dir
-              + " passed disk check, adding to list of valid directories.");
+          numFailures++;
         }
       }
-    }
-    Set<String> postCheckFullDirs = new HashSet<String>(fullDirs);
-    Set<String> postCheckOtherDirs = new HashSet<String>(errorDirs);
-    for (String dir : preCheckFullDirs) {
-      if (postCheckOtherDirs.contains(dir)) {
-        LOG.warn("Directory " + dir + " error "
-            + dirsFailedCheck.get(dir).message);
+      for (String dir : allLocalDirs) {
+        if (!dirsFailedCheck.containsKey(dir)) {
+          localDirs.add(dir);
+          if (preCheckFullDirs.contains(dir)
+              || preCheckOtherErrorDirs.contains(dir)) {
+            setChanged = true;
+            LOG.info("Directory " + dir
+                + " passed disk check, adding to list of valid directories.");
+          }
+        }
       }
-    }
+      Set<String> postCheckFullDirs = new HashSet<String>(fullDirs);
+      Set<String> postCheckOtherDirs = new HashSet<String>(errorDirs);
+      for (String dir : preCheckFullDirs) {
+        if (postCheckOtherDirs.contains(dir)) {
+          LOG.warn("Directory " + dir + " error "
+              + dirsFailedCheck.get(dir).message);
+        }
+      }
 
-    for (String dir : preCheckOtherErrorDirs) {
-      if (postCheckFullDirs.contains(dir)) {
-        LOG.warn("Directory " + dir + " error "
-            + dirsFailedCheck.get(dir).message);
+      for (String dir : preCheckOtherErrorDirs) {
+        if (postCheckFullDirs.contains(dir)) {
+          LOG.warn("Directory " + dir + " error "
+              + dirsFailedCheck.get(dir).message);
+        }
       }
-    }
-    setGoodDirsDiskUtilizationPercentage();
-    if (setChanged) {
-      for (DirsChangeListener listener : dirsChangeListeners) {
-        listener.onDirsChanged();
+      setGoodDirsDiskUtilizationPercentage();
+      if (setChanged) {
+        for (DirsChangeListener listener : dirsChangeListeners) {
+          listener.onDirsChanged();
+        }
       }
+      return setChanged;
+    } finally {
+      this.writeLock.unlock();
     }
-    return setChanged;
   }
 
   Map<String, DiskErrorInformation> testDirs(List<String> dirs,
@@ -330,7 +467,7 @@ public class DirectoryCollection {
       String msg;
       try {
         File testDir = new File(dir);
-        DiskChecker.checkDir(testDir);
+        diskValidator.checkStatus(testDir);
         float diskUtilizationPercentageCutoff = goodDirs.contains(dir) ?
             diskUtilizationPercentageCutoffHigh : diskUtilizationPercentageCutoffLow;
         if (isDiskUsageOverPercentageLimit(testDir,
@@ -350,40 +487,12 @@ public class DirectoryCollection {
             new DiskErrorInformation(DiskErrorCause.DISK_FULL, msg));
           continue;
         }
-
-        // create a random dir to make sure fs isn't in read-only mode
-        verifyDirUsingMkdir(testDir);
       } catch (IOException ie) {
         ret.put(dir,
           new DiskErrorInformation(DiskErrorCause.OTHER, ie.getMessage()));
       }
     }
     return ret;
-  }
-
-  /**
-   * Function to test whether a dir is working correctly by actually creating a
-   * random directory.
-   *
-   * @param dir
-   *          the dir to test
-   */
-  private void verifyDirUsingMkdir(File dir) throws IOException {
-
-    String randomDirName = RandomStringUtils.randomAlphanumeric(5);
-    File target = new File(dir, randomDirName);
-    int i = 0;
-    while (target.exists()) {
-
-      randomDirName = RandomStringUtils.randomAlphanumeric(5) + i;
-      target = new File(dir, randomDirName);
-      i++;
-    }
-    try {
-      DiskChecker.checkDir(target);
-    } finally {
-      FileUtils.deleteQuietly(target);
-    }
   }
 
   private boolean isDiskUsageOverPercentageLimit(File dir,
@@ -409,7 +518,11 @@ public class DirectoryCollection {
       localFs.getFileStatus(dir);
     } catch (FileNotFoundException e) {
       createDir(localFs, dir.getParent(), perm);
-      localFs.mkdir(dir, perm, false);
+      try {
+        localFs.mkdir(dir, perm, false);
+      } catch (FileAlreadyExistsException ex) {
+        // do nothing as other threads could in creating the same directory.
+      }
       if (!perm.equals(perm.applyUMask(localFs.getUMask()))) {
         localFs.setPermission(dir, perm);
       }
@@ -461,7 +574,7 @@ public class DirectoryCollection {
     if (totalSpace != 0) {
       long tmp = ((totalSpace - usableSpace) * 100) / totalSpace;
       if (Integer.MIN_VALUE < tmp && Integer.MAX_VALUE > tmp) {
-        goodDirsDiskUtilizationPercentage = (int) tmp;
+        goodDirsDiskUtilizationPercentage = Math.toIntExact(tmp);
       }
     } else {
       // got no good dirs

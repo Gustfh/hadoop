@@ -44,10 +44,9 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
-import com.google.common.io.Files;
 import org.apache.commons.cli.ParseException;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -86,11 +85,10 @@ import org.apache.hadoop.test.PathUtils;
 import org.apache.hadoop.util.ExitUtil;
 import org.apache.hadoop.util.ExitUtil.ExitException;
 import org.apache.hadoop.util.StringUtils;
-import org.apache.log4j.Level;
+import org.slf4j.event.Level;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
-import org.mockito.ArgumentMatcher;
 import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
@@ -108,10 +106,10 @@ import com.google.common.primitives.Ints;
 public class TestCheckpoint {
 
   static {
-    GenericTestUtils.setLogLevel(FSImage.LOG, Level.ALL);
+    GenericTestUtils.setLogLevel(FSImage.LOG, Level.TRACE);
   }
 
-  static final Log LOG = LogFactory.getLog(TestCheckpoint.class); 
+  static final Logger LOG = LoggerFactory.getLogger(TestCheckpoint.class);
   static final String NN_METRICS = "NameNodeActivity";
   
   static final long seed = 0xDEADBEEFL;
@@ -509,8 +507,8 @@ public class TestCheckpoint {
       Mockito.reset(faultInjector);
       secondary.shutdown(); // secondary namenode crash!
 
-      // start new instance of secondary and verify that 
-      // a new rollEditLog suceedes inspite of the fact that 
+      // start new instance of secondary and verify that
+      // a new rollEditLog succeeds inspite of the fact that
       // edits.new already exists.
       //
       secondary = startSecondaryNameNode(conf);
@@ -622,14 +620,7 @@ public class TestCheckpoint {
   }
 
   private File filePathContaining(final String substring) {
-    return Mockito.argThat(
-        new ArgumentMatcher<File>() {
-          @Override
-          public boolean matches(Object argument) {
-            String path = ((File) argument).getAbsolutePath();
-            return path.contains(substring);
-          }
-        });
+    return Mockito.argThat(arg -> arg.getAbsolutePath().contains(substring));
   }
 
   private void checkTempImages(NNStorage storage) throws IOException {
@@ -872,7 +863,7 @@ public class TestCheckpoint {
       }
       
       LogCapturer logs = GenericTestUtils.LogCapturer.captureLogs(
-          LogFactory.getLog(Storage.class));
+          LoggerFactory.getLogger(Storage.class));
       try {
         // try to lock the storage that's already locked
         savedSd.lock();
@@ -1030,6 +1021,7 @@ public class TestCheckpoint {
    */
   @Test
   public void testCheckpoint() throws IOException {
+    Path tmpDir = new Path("/tmp_tmp");
     Path file1 = new Path("checkpoint.dat");
     Path file2 = new Path("checkpoint2.dat");
     Configuration conf = new HdfsConfiguration();
@@ -1057,6 +1049,11 @@ public class TestCheckpoint {
           replication, seed);
       checkFile(fileSys, file1, replication);
 
+      for(int i=0; i < 1000; i++) {
+        fileSys.mkdirs(tmpDir);
+        fileSys.delete(tmpDir, true);
+      }
+
       //
       // Take a checkpoint
       //
@@ -1081,7 +1078,6 @@ public class TestCheckpoint {
     //
     // Restart cluster and verify that file1 still exist.
     //
-    Path tmpDir = new Path("/tmp_tmp");
     try {
       cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
           .format(false).build();
@@ -1989,7 +1985,7 @@ public class TestCheckpoint {
       NNStorage dstImage = Mockito.mock(NNStorage.class);
       Mockito.doReturn(Lists.newArrayList(new File("/wont-be-written")))
         .when(dstImage).getFiles(
-            Mockito.<NameNodeDirType>anyObject(), Mockito.anyString());
+            Mockito.<NameNodeDirType>any(), Mockito.anyString());
 
       File mockImageFile = File.createTempFile("image", "");
       FileOutputStream imageFile = new FileOutputStream(mockImageFile);
@@ -2431,7 +2427,8 @@ public class TestCheckpoint {
   public void testLegacyOivImage() throws Exception {
     MiniDFSCluster cluster = null;
     SecondaryNameNode secondary = null;
-    File tmpDir = Files.createTempDir();
+    File tmpDir = GenericTestUtils.getTestDir("testLegacyOivImage");
+    tmpDir.mkdirs();
     Configuration conf = new HdfsConfiguration();
     conf.set(DFSConfigKeys.DFS_NAMENODE_LEGACY_OIV_IMAGE_DIR_KEY,
         tmpDir.getAbsolutePath());

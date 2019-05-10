@@ -18,6 +18,7 @@
 package org.apache.hadoop.hdfs.server.namenode;
 
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_ADD;
+import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_ADD_ERASURE_CODING_POLICY;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_APPEND;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_ADD_BLOCK;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_ADD_CACHE_DIRECTIVE;
@@ -31,7 +32,9 @@ import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_CONCAT_
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_CREATE_SNAPSHOT;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_DELETE;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_DELETE_SNAPSHOT;
+import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_DISABLE_ERASURE_CODING_POLICY;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_DISALLOW_SNAPSHOT;
+import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_ENABLE_ERASURE_CODING_POLICY;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_END_LOG_SEGMENT;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_GET_DELEGATION_TOKEN;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_INVALID;
@@ -41,6 +44,7 @@ import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_MODIFY_
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_REASSIGN_LEASE;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_REMOVE_CACHE_DIRECTIVE;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_REMOVE_CACHE_POOL;
+import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_REMOVE_ERASURE_CODING_POLICY;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_REMOVE_XATTR;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_RENAME;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_RENAME_OLD;
@@ -75,7 +79,9 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.zip.CheckedInputStream;
 import java.util.zip.Checksum;
 
@@ -100,6 +106,7 @@ import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
 import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
 import org.apache.hadoop.hdfs.protocol.ClientProtocol;
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion.Feature;
@@ -119,6 +126,8 @@ import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.io.WritableFactories;
 import org.apache.hadoop.io.WritableFactory;
+import org.apache.hadoop.io.erasurecode.ECSchema;
+import org.apache.hadoop.io.erasurecode.ErasureCodeConstants;
 import org.apache.hadoop.ipc.ClientId;
 import org.apache.hadoop.ipc.RpcConstants;
 import org.apache.hadoop.security.token.delegation.DelegationKey;
@@ -148,7 +157,7 @@ public abstract class FSEditLogOp {
   int rpcCallId;
 
   public static class OpInstanceCache {
-    private static ThreadLocal<OpInstanceCacheMap> cache =
+    private static final ThreadLocal<OpInstanceCacheMap> CACHE =
         new ThreadLocal<OpInstanceCacheMap>() {
       @Override
       protected OpInstanceCacheMap initialValue() {
@@ -179,7 +188,7 @@ public abstract class FSEditLogOp {
 
     @SuppressWarnings("unchecked")
     public <T extends FSEditLogOp> T get(FSEditLogOpCodes opCode) {
-      return useCache ? (T)cache.get().get(opCode) : (T)newInstance(opCode);
+      return useCache ? (T)CACHE.get().get(opCode) : (T)newInstance(opCode);
     }
 
     private static FSEditLogOp newInstance(FSEditLogOpCodes opCode) {
@@ -305,10 +314,10 @@ public abstract class FSEditLogOp {
   
   private static void appendRpcIdsToString(final StringBuilder builder,
       final byte[] clientId, final int callId) {
-    builder.append(", RpcClientId=");
-    builder.append(ClientId.toString(clientId));
-    builder.append(", RpcCallId=");
-    builder.append(callId);
+    builder.append(", RpcClientId=")
+        .append(ClientId.toString(clientId))
+        .append(", RpcCallId=")
+        .append(callId);
   }
   
   private static void appendRpcIdsToXml(ContentHandler contentHandler,
@@ -417,10 +426,12 @@ public abstract class FSEditLogOp {
     String clientMachine;
     boolean overwrite;
     byte storagePolicyId;
+    byte erasureCodingPolicyId;
     
     private AddCloseOp(FSEditLogOpCodes opCode) {
       super(opCode);
       storagePolicyId = HdfsConstants.BLOCK_STORAGE_POLICY_ID_UNSPECIFIED;
+      erasureCodingPolicyId = ErasureCodeConstants.REPLICATION_POLICY_ID;
       assert(opCode == OP_ADD || opCode == OP_CLOSE || opCode == OP_APPEND);
     }
 
@@ -441,6 +452,7 @@ public abstract class FSEditLogOp {
       clientMachine = null;
       overwrite = false;
       storagePolicyId = 0;
+      erasureCodingPolicyId = ErasureCodeConstants.REPLICATION_POLICY_ID;
     }
 
     <T extends AddCloseOp> T setInodeId(long inodeId) {
@@ -527,6 +539,11 @@ public abstract class FSEditLogOp {
       return (T)this;
     }
 
+    <T extends AddCloseOp> T setErasureCodingPolicyId(byte ecPolicyId) {
+      this.erasureCodingPolicyId = ecPolicyId;
+      return (T)this;
+    }
+
     @Override
     public void writeFields(DataOutputStream out) throws IOException {
       FSImageSerialization.writeLong(inodeId, out);
@@ -547,6 +564,7 @@ public abstract class FSEditLogOp {
         FSImageSerialization.writeString(clientMachine,out);
         FSImageSerialization.writeBoolean(overwrite, out);
         FSImageSerialization.writeByte(storagePolicyId, out);
+        FSImageSerialization.writeByte(erasureCodingPolicyId, out);
         // write clientId and callId
         writeRpcIds(rpcClientId, rpcCallId, out);
       }
@@ -625,6 +643,14 @@ public abstract class FSEditLogOp {
           this.storagePolicyId =
               HdfsConstants.BLOCK_STORAGE_POLICY_ID_UNSPECIFIED;
         }
+
+        if (NameNodeLayoutVersion.supports(
+            NameNodeLayoutVersion.Feature.ERASURE_CODING, logVersion)) {
+          this.erasureCodingPolicyId = FSImageSerialization.readByte(in);
+        } else {
+          this.erasureCodingPolicyId =
+              ErasureCodeConstants.REPLICATION_POLICY_ID;
+        }
         // read clientId and callId
         readRpcIds(in, logVersion);
       } else {
@@ -656,42 +682,44 @@ public abstract class FSEditLogOp {
 
     public String stringifyMembers() {
       StringBuilder builder = new StringBuilder();
-      builder.append("[length=");
-      builder.append(length);
-      builder.append(", inodeId=");
-      builder.append(inodeId);
-      builder.append(", path=");
-      builder.append(path);
-      builder.append(", replication=");
-      builder.append(replication);
-      builder.append(", mtime=");
-      builder.append(mtime);
-      builder.append(", atime=");
-      builder.append(atime);
-      builder.append(", blockSize=");
-      builder.append(blockSize);
-      builder.append(", blocks=");
-      builder.append(Arrays.toString(blocks));
-      builder.append(", permissions=");
-      builder.append(permissions);
-      builder.append(", aclEntries=");
-      builder.append(aclEntries);
-      builder.append(", clientName=");
-      builder.append(clientName);
-      builder.append(", clientMachine=");
-      builder.append(clientMachine);
-      builder.append(", overwrite=");
-      builder.append(overwrite);
+      builder.append("[length=")
+          .append(length)
+          .append(", inodeId=")
+          .append(inodeId)
+          .append(", path=")
+          .append(path)
+          .append(", replication=")
+          .append(replication)
+          .append(", mtime=")
+          .append(mtime)
+          .append(", atime=")
+          .append(atime)
+          .append(", blockSize=")
+          .append(blockSize)
+          .append(", blocks=")
+          .append(Arrays.toString(blocks))
+          .append(", permissions=")
+          .append(permissions)
+          .append(", aclEntries=")
+          .append(aclEntries)
+          .append(", clientName=")
+          .append(clientName)
+          .append(", clientMachine=")
+          .append(clientMachine)
+          .append(", overwrite=")
+          .append(overwrite);
       if (this.opCode == OP_ADD) {
         appendRpcIdsToString(builder, rpcClientId, rpcCallId);
       }
-      builder.append(", storagePolicyId=");
-      builder.append(storagePolicyId);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append(", storagePolicyId=")
+          .append(storagePolicyId)
+          .append(", erasureCodingPolicyId=")
+          .append(erasureCodingPolicyId)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
     
@@ -722,6 +750,8 @@ public abstract class FSEditLogOp {
         if (aclEntries != null) {
           appendAclEntriesToXml(contentHandler, aclEntries);
         }
+        XMLUtils.addSaxString(contentHandler, "ERASURE_CODING_POLICY_ID",
+            Byte.toString(erasureCodingPolicyId));
         appendRpcIdsToXml(contentHandler, rpcClientId, rpcCallId);
       }
     }
@@ -750,6 +780,10 @@ public abstract class FSEditLogOp {
       }
       this.permissions = permissionStatusFromXml(st);
       aclEntries = readAclEntriesFromXml(st);
+      if (st.hasChildren("ERASURE_CODING_POLICY_ID")) {
+        this.erasureCodingPolicyId = Byte.parseByte(st.getValue(
+            "ERASURE_CODING_POLICY_ID"));
+      }
       readRpcIdsFromXml(st);
     }
   }
@@ -775,8 +809,8 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("AddOp ");
-      builder.append(stringifyMembers());
+      builder.append("AddOp ")
+          .append(stringifyMembers());
       return builder.toString();
     }
   }
@@ -803,8 +837,8 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("CloseOp ");
-      builder.append(stringifyMembers());
+      builder.append("CloseOp ")
+          .append(stringifyMembers());
       return builder.toString();
     }
   }
@@ -846,11 +880,11 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("AppendOp ");
-      builder.append("[path=").append(path);
-      builder.append(", clientName=").append(clientName);
-      builder.append(", clientMachine=").append(clientMachine);
-      builder.append(", newBlock=").append(newBlock).append("]");
+      builder.append("AppendOp ")
+          .append("[path=").append(path)
+          .append(", clientName=").append(clientName)
+          .append(", clientMachine=").append(clientMachine)
+          .append(", newBlock=").append(newBlock).append("]");
       return builder.toString();
     }
 
@@ -976,11 +1010,11 @@ public abstract class FSEditLogOp {
     public String toString() {
       StringBuilder sb = new StringBuilder();
       sb.append("AddBlockOp [path=")
-        .append(path)
-        .append(", penultimateBlock=")
-        .append(penultimateBlock == null ? "NULL" : penultimateBlock)
-        .append(", lastBlock=")
-        .append(lastBlock);
+          .append(path)
+          .append(", penultimateBlock=")
+          .append(penultimateBlock == null ? "NULL" : penultimateBlock)
+          .append(", lastBlock=")
+          .append(lastBlock);
       appendRpcIdsToString(sb, rpcClientId, rpcCallId);
       sb.append("]");
       return sb.toString();
@@ -1157,15 +1191,15 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("SetReplicationOp [path=");
-      builder.append(path);
-      builder.append(", replication=");
-      builder.append(replication);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append("SetReplicationOp [path=")
+          .append(path)
+          .append(", replication=")
+          .append(replication)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
     
@@ -1289,20 +1323,20 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("ConcatDeleteOp [length=");
-      builder.append(length);
-      builder.append(", trg=");
-      builder.append(trg);
-      builder.append(", srcs=");
-      builder.append(Arrays.toString(srcs));
-      builder.append(", timestamp=");
-      builder.append(timestamp);
+      builder.append("ConcatDeleteOp [length=")
+          .append(length)
+          .append(", trg=")
+          .append(trg)
+          .append(", srcs=")
+          .append(Arrays.toString(srcs))
+          .append(", timestamp=")
+          .append(timestamp);
       appendRpcIdsToString(builder, rpcClientId, rpcCallId);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
     
@@ -1415,20 +1449,20 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("RenameOldOp [length=");
-      builder.append(length);
-      builder.append(", src=");
-      builder.append(src);
-      builder.append(", dst=");
-      builder.append(dst);
-      builder.append(", timestamp=");
-      builder.append(timestamp);
+      builder.append("RenameOldOp [length=")
+          .append(length)
+          .append(", src=")
+          .append(src)
+          .append(", dst=")
+          .append(dst)
+          .append(", timestamp=")
+          .append(timestamp);
       appendRpcIdsToString(builder, rpcClientId, rpcCallId);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
     
@@ -1517,18 +1551,18 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("DeleteOp [length=");
-      builder.append(length);
-      builder.append(", path=");
-      builder.append(path);
-      builder.append(", timestamp=");
-      builder.append(timestamp);
+      builder.append("DeleteOp [length=")
+          .append(length)
+          .append(", path=")
+          .append(path)
+          .append(", timestamp=")
+          .append(timestamp);
       appendRpcIdsToString(builder, rpcClientId, rpcCallId);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
     
@@ -1673,25 +1707,25 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("MkdirOp [length=");
-      builder.append(length);
-      builder.append(", inodeId=");
-      builder.append(inodeId);
-      builder.append(", path=");
-      builder.append(path);
-      builder.append(", timestamp=");
-      builder.append(timestamp);
-      builder.append(", permissions=");
-      builder.append(permissions);
-      builder.append(", aclEntries=");
-      builder.append(aclEntries);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append(", xAttrs=");
-      builder.append(xAttrs);
-      builder.append("]");
+      builder.append("MkdirOp [length=")
+          .append(length)
+          .append(", inodeId=")
+          .append(inodeId)
+          .append(", path=")
+          .append(path)
+          .append(", timestamp=")
+          .append(timestamp)
+          .append(", permissions=")
+          .append(permissions)
+          .append(", aclEntries=")
+          .append(aclEntries)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append(", xAttrs=")
+          .append(xAttrs)
+          .append("]");
       return builder.toString();
     }
 
@@ -1767,13 +1801,13 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("SetGenstampOp [GenStamp=");
-      builder.append(genStampV1);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append("SetGenstampOp [GenStamp=")
+          .append(genStampV1)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
 
@@ -1825,13 +1859,13 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("SetGenstampV2Op [GenStampV2=");
-      builder.append(genStampV2);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append("SetGenstampV2Op [GenStampV2=")
+          .append(genStampV2)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
 
@@ -1883,13 +1917,13 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("AllocateBlockIdOp [blockId=");
-      builder.append(blockId);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append("AllocateBlockIdOp [blockId=")
+          .append(blockId)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
 
@@ -1950,15 +1984,15 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("SetPermissionsOp [src=");
-      builder.append(src);
-      builder.append(", permissions=");
-      builder.append(permissions);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append("SetPermissionsOp [src=")
+          .append(src)
+          .append(", permissions=")
+          .append(permissions)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
     
@@ -2031,17 +2065,17 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("SetOwnerOp [src=");
-      builder.append(src);
-      builder.append(", username=");
-      builder.append(username);
-      builder.append(", groupname=");
-      builder.append(groupname);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append("SetOwnerOp [src=")
+          .append(src)
+          .append(", username=")
+          .append(username)
+          .append(", groupname=")
+          .append(groupname)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
     
@@ -2099,15 +2133,15 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("SetNSQuotaOp [src=");
-      builder.append(src);
-      builder.append(", nsQuota=");
-      builder.append(nsQuota);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append("SetNSQuotaOp [src=")
+          .append(src)
+          .append(", nsQuota=")
+          .append(nsQuota)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
     
@@ -2155,13 +2189,13 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("ClearNSQuotaOp [src=");
-      builder.append(src);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append("ClearNSQuotaOp [src=")
+          .append(src)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
     
@@ -2230,17 +2264,17 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("SetQuotaOp [src=");
-      builder.append(src);
-      builder.append(", nsQuota=");
-      builder.append(nsQuota);
-      builder.append(", dsQuota=");
-      builder.append(dsQuota);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append("SetQuotaOp [src=")
+          .append(src)
+          .append(", nsQuota=")
+          .append(nsQuota)
+          .append(", dsQuota=")
+          .append(dsQuota)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
     
@@ -2311,17 +2345,17 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("SetTypeQuotaOp [src=");
-      builder.append(src);
-      builder.append(", storageType=");
-      builder.append(type);
-      builder.append(", dsQuota=");
-      builder.append(dsQuota);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append("SetTypeQuotaOp [src=")
+          .append(src)
+          .append(", storageType=")
+          .append(type)
+          .append(", dsQuota=")
+          .append(dsQuota)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
 
@@ -2413,18 +2447,18 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("TimesOp [length=");
-      builder.append(length);
-      builder.append(", path=");
-      builder.append(path);
-      builder.append(", mtime=");
-      builder.append(mtime);
-      builder.append(", atime=");
-      builder.append(atime);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
+      builder.append("TimesOp [length=")
+          .append(length)
+          .append(", path=")
+          .append(path)
+          .append(", mtime=")
+          .append(mtime)
+          .append(", atime=")
+          .append(atime)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid);
       builder.append("]");
       return builder.toString();
     }
@@ -2556,26 +2590,26 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("SymlinkOp [length=");
-      builder.append(length);
-      builder.append(", inodeId=");
-      builder.append(inodeId);
-      builder.append(", path=");
-      builder.append(path);
-      builder.append(", value=");
-      builder.append(value);
-      builder.append(", mtime=");
-      builder.append(mtime);
-      builder.append(", atime=");
-      builder.append(atime);
-      builder.append(", permissionStatus=");
-      builder.append(permissionStatus);
+      builder.append("SymlinkOp [length=")
+          .append(length)
+          .append(", inodeId=")
+          .append(inodeId)
+          .append(", path=")
+          .append(path)
+          .append(", value=")
+          .append(value)
+          .append(", mtime=")
+          .append(mtime)
+          .append(", atime=")
+          .append(atime)
+          .append(", permissionStatus=")
+          .append(permissionStatus);
       appendRpcIdsToString(builder, rpcClientId, rpcCallId);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
     
@@ -2714,22 +2748,22 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("RenameOp [length=");
-      builder.append(length);
-      builder.append(", src=");
-      builder.append(src);
-      builder.append(", dst=");
-      builder.append(dst);
-      builder.append(", timestamp=");
-      builder.append(timestamp);
-      builder.append(", options=");
-      builder.append(Arrays.toString(options));
+      builder.append("RenameOp [length=")
+          .append(length)
+          .append(", src=")
+          .append(src)
+          .append(", dst=")
+          .append(dst)
+          .append(", timestamp=")
+          .append(timestamp)
+          .append(", options=")
+          .append(Arrays.toString(options));
       appendRpcIdsToString(builder, rpcClientId, rpcCallId);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
     
@@ -2884,23 +2918,23 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("TruncateOp [src=");
-      builder.append(src);
-      builder.append(", clientName=");
-      builder.append(clientName);
-      builder.append(", clientMachine=");
-      builder.append(clientMachine);
-      builder.append(", newLength=");
-      builder.append(newLength);
-      builder.append(", timestamp=");
-      builder.append(timestamp);
-      builder.append(", truncateBlock=");
-      builder.append(truncateBlock);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append("TruncateOp [src=")
+          .append(src)
+          .append(", clientName=")
+          .append(clientName)
+          .append(", clientMachine=")
+          .append(clientMachine)
+          .append(", newLength=")
+          .append(newLength)
+          .append(", timestamp=")
+          .append(timestamp)
+          .append(", truncateBlock=")
+          .append(truncateBlock)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
   }
@@ -2964,16 +2998,16 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("ReassignLeaseOp [leaseHolder=");
-      builder.append(leaseHolder);
-      builder.append(", path=");
-      builder.append(path);
-      builder.append(", newHolder=");
-      builder.append(newHolder);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
+      builder.append("ReassignLeaseOp [leaseHolder=")
+          .append(leaseHolder)
+          .append(", path=")
+          .append(path)
+          .append(", newHolder=")
+          .append(newHolder)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid);
       builder.append("]");
       return builder.toString();
     }
@@ -3045,15 +3079,15 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("GetDelegationTokenOp [token=");
-      builder.append(token);
-      builder.append(", expiryTime=");
-      builder.append(expiryTime);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append("GetDelegationTokenOp [token=")
+          .append(token)
+          .append(", expiryTime=")
+          .append(expiryTime)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
     
@@ -3124,15 +3158,15 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("RenewDelegationTokenOp [token=");
-      builder.append(token);
-      builder.append(", expiryTime=");
-      builder.append(expiryTime);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append("RenewDelegationTokenOp [token=")
+          .append(token)
+          .append(", expiryTime=")
+          .append(expiryTime)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
     
@@ -3189,13 +3223,13 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("CancelDelegationTokenOp [token=");
-      builder.append(token);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append("CancelDelegationTokenOp [token=")
+          .append(token)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
     
@@ -3247,13 +3281,13 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("UpdateMasterKeyOp [key=");
-      builder.append(key);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append("UpdateMasterKeyOp [key=")
+          .append(key)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
     
@@ -3300,11 +3334,11 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("LogSegmentOp [opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append("LogSegmentOp [opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
 
@@ -3357,11 +3391,11 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("InvalidOp [opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append("InvalidOp [opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
     @Override
@@ -3440,10 +3474,10 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("CreateSnapshotOp [snapshotRoot=");
-      builder.append(snapshotRoot);
-      builder.append(", snapshotName=");
-      builder.append(snapshotName);
+      builder.append("CreateSnapshotOp [snapshotRoot=")
+          .append(snapshotRoot)
+          .append(", snapshotName=")
+          .append(snapshotName);
       appendRpcIdsToString(builder, rpcClientId, rpcCallId);
       builder.append("]");
       return builder.toString();
@@ -3516,10 +3550,10 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("DeleteSnapshotOp [snapshotRoot=");
-      builder.append(snapshotRoot);
-      builder.append(", snapshotName=");
-      builder.append(snapshotName);
+      builder.append("DeleteSnapshotOp [snapshotRoot=")
+          .append(snapshotRoot)
+          .append(", snapshotName=")
+          .append(snapshotName);
       appendRpcIdsToString(builder, rpcClientId, rpcCallId);
       builder.append("]");
       return builder.toString();
@@ -3604,12 +3638,12 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("RenameSnapshotOp [snapshotRoot=");
-      builder.append(snapshotRoot);
-      builder.append(", snapshotOldName=");
-      builder.append(snapshotOldName);
-      builder.append(", snapshotNewName=");
-      builder.append(snapshotNewName);
+      builder.append("RenameSnapshotOp [snapshotRoot=")
+          .append(snapshotRoot)
+          .append(", snapshotOldName=")
+          .append(snapshotOldName)
+          .append(", snapshotNewName=")
+          .append(snapshotNewName);
       appendRpcIdsToString(builder, rpcClientId, rpcCallId);
       builder.append("]");
       return builder.toString();
@@ -3668,9 +3702,9 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("AllowSnapshotOp [snapshotRoot=");
-      builder.append(snapshotRoot);
-      builder.append("]");
+      builder.append("AllowSnapshotOp [snapshotRoot=")
+          .append(snapshotRoot)
+          .append("]");
       return builder.toString();
     }
   }
@@ -3726,9 +3760,9 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("DisallowSnapshotOp [snapshotRoot=");
-      builder.append(snapshotRoot);
-      builder.append("]");
+      builder.append("DisallowSnapshotOp [snapshotRoot=")
+          .append(snapshotRoot)
+          .append("]");
       return builder.toString();
     }
   }
@@ -3745,8 +3779,7 @@ public abstract class FSEditLogOp {
     }
 
     static AddCacheDirectiveInfoOp getInstance(OpInstanceCache cache) {
-      return (AddCacheDirectiveInfoOp) cache
-          .get(OP_ADD_CACHE_DIRECTIVE);
+      return (AddCacheDirectiveInfoOp) cache.get(OP_ADD_CACHE_DIRECTIVE);
     }
 
     @Override
@@ -3792,12 +3825,12 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("AddCacheDirectiveInfo [");
-      builder.append("id=" + directive.getId() + ",");
-      builder.append("path=" + directive.getPath().toUri().getPath() + ",");
-      builder.append("replication=" + directive.getReplication() + ",");
-      builder.append("pool=" + directive.getPool() + ",");
-      builder.append("expiration=" + directive.getExpiration().getMillis());
+      builder.append("AddCacheDirectiveInfo [")
+          .append("id=" + directive.getId() + ",")
+          .append("path=" + directive.getPath().toUri().getPath() + ",")
+          .append("replication=" + directive.getReplication() + ",")
+          .append("pool=" + directive.getPool() + ",")
+          .append("expiration=" + directive.getExpiration().getMillis());
       appendRpcIdsToString(builder, rpcClientId, rpcCallId);
       builder.append("]");
       return builder.toString();
@@ -3816,8 +3849,7 @@ public abstract class FSEditLogOp {
     }
 
     static ModifyCacheDirectiveInfoOp getInstance(OpInstanceCache cache) {
-      return (ModifyCacheDirectiveInfoOp) cache
-          .get(OP_MODIFY_CACHE_DIRECTIVE);
+      return (ModifyCacheDirectiveInfoOp) cache.get(OP_MODIFY_CACHE_DIRECTIVE);
     }
 
     @Override
@@ -3859,8 +3891,8 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("ModifyCacheDirectiveInfoOp[");
-      builder.append("id=").append(directive.getId());
+      builder.append("ModifyCacheDirectiveInfoOp[")
+          .append("id=").append(directive.getId());
       if (directive.getPath() != null) {
         builder.append(",").append("path=").append(directive.getPath());
       }
@@ -3893,8 +3925,7 @@ public abstract class FSEditLogOp {
     }
 
     static RemoveCacheDirectiveInfoOp getInstance(OpInstanceCache cache) {
-      return (RemoveCacheDirectiveInfoOp) cache
-          .get(OP_REMOVE_CACHE_DIRECTIVE);
+      return (RemoveCacheDirectiveInfoOp) cache.get(OP_REMOVE_CACHE_DIRECTIVE);
     }
 
     @Override
@@ -3934,8 +3965,8 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("RemoveCacheDirectiveInfo [");
-      builder.append("id=" + Long.toString(id));
+      builder.append("RemoveCacheDirectiveInfo [")
+          .append("id=" + Long.toString(id));
       appendRpcIdsToString(builder, rpcClientId, rpcCallId);
       builder.append("]");
       return builder.toString();
@@ -3996,12 +4027,12 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("AddCachePoolOp [");
-      builder.append("poolName=" + info.getPoolName() + ",");
-      builder.append("ownerName=" + info.getOwnerName() + ",");
-      builder.append("groupName=" + info.getGroupName() + ",");
-      builder.append("mode=" + Short.toString(info.getMode().toShort()) + ",");
-      builder.append("limit=" + Long.toString(info.getLimit()));
+      builder.append("AddCachePoolOp [")
+          .append("poolName=" + info.getPoolName() + ",")
+          .append("ownerName=" + info.getOwnerName() + ",")
+          .append("groupName=" + info.getGroupName() + ",")
+          .append("mode=" + Short.toString(info.getMode().toShort()) + ",")
+          .append("limit=" + Long.toString(info.getLimit()));
       appendRpcIdsToString(builder, rpcClientId, rpcCallId);
       builder.append("]");
       return builder.toString();
@@ -4130,8 +4161,8 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("RemoveCachePoolOp [");
-      builder.append("poolName=" + poolName);
+      builder.append("RemoveCachePoolOp [")
+          .append("poolName=" + poolName);
       appendRpcIdsToString(builder, rpcClientId, rpcCallId);
       builder.append("]");
       return builder.toString();
@@ -4146,8 +4177,8 @@ public abstract class FSEditLogOp {
       super(OP_REMOVE_XATTR);
     }
     
-    static RemoveXAttrOp getInstance() {
-      return new RemoveXAttrOp();
+    static RemoveXAttrOp getInstance(OpInstanceCache cache) {
+      return (RemoveXAttrOp) cache.get(OP_REMOVE_XATTR);
     }
 
     @Override
@@ -4199,8 +4230,8 @@ public abstract class FSEditLogOp {
       super(OP_SET_XATTR);
     }
     
-    static SetXAttrOp getInstance() {
-      return new SetXAttrOp();
+    static SetXAttrOp getInstance(OpInstanceCache cache) {
+      return (SetXAttrOp) cache.get(OP_SET_XATTR);
     }
 
     @Override
@@ -4252,8 +4283,8 @@ public abstract class FSEditLogOp {
       super(OP_SET_ACL);
     }
 
-    static SetAclOp getInstance() {
-      return new SetAclOp();
+    static SetAclOp getInstance(OpInstanceCache cache) {
+      return (SetAclOp) cache.get(OP_SET_ACL);
     }
 
     @Override
@@ -4342,6 +4373,323 @@ public abstract class FSEditLogOp {
       this.len = in.readLong();
     }
   }
+
+  /**
+   * Operation corresponding to add an erasure coding policy.
+   */
+  static class AddErasureCodingPolicyOp extends FSEditLogOp {
+    private ErasureCodingPolicy ecPolicy;
+
+    AddErasureCodingPolicyOp() {
+      super(OP_ADD_ERASURE_CODING_POLICY);
+    }
+
+    static AddErasureCodingPolicyOp getInstance(OpInstanceCache cache) {
+      return (AddErasureCodingPolicyOp) cache
+          .get(OP_ADD_ERASURE_CODING_POLICY);
+    }
+
+    @Override
+    void resetSubFields() {
+      this.ecPolicy = null;
+    }
+
+    public ErasureCodingPolicy getEcPolicy() {
+      return this.ecPolicy;
+    }
+
+    public AddErasureCodingPolicyOp setErasureCodingPolicy(
+        ErasureCodingPolicy policy) {
+      Preconditions.checkNotNull(policy.getName());
+      Preconditions.checkNotNull(policy.getSchema());
+      Preconditions.checkArgument(policy.getCellSize() > 0);
+      this.ecPolicy = policy;
+      return this;
+    }
+
+    @Override
+    void readFields(DataInputStream in, int logVersion) throws IOException {
+      this.ecPolicy = FSImageSerialization.readErasureCodingPolicy(in);
+      readRpcIds(in, logVersion);
+    }
+
+    @Override
+    public void writeFields(DataOutputStream out) throws IOException {
+      Preconditions.checkNotNull(ecPolicy);
+      FSImageSerialization.writeErasureCodingPolicy(out, ecPolicy);
+      writeRpcIds(rpcClientId, rpcCallId, out);
+    }
+
+    @Override
+    protected void toXml(ContentHandler contentHandler) throws SAXException {
+      Preconditions.checkNotNull(ecPolicy);
+      XMLUtils.addSaxString(contentHandler, "CODEC", ecPolicy.getCodecName());
+      XMLUtils.addSaxString(contentHandler, "DATAUNITS",
+          Integer.toString(ecPolicy.getNumDataUnits()));
+      XMLUtils.addSaxString(contentHandler, "PARITYUNITS",
+          Integer.toString(ecPolicy.getNumParityUnits()));
+      XMLUtils.addSaxString(contentHandler, "CELLSIZE",
+          Integer.toString(ecPolicy.getCellSize()));
+
+      Map<String, String> extraOptions = ecPolicy.getSchema().getExtraOptions();
+      if (extraOptions == null || extraOptions.isEmpty()) {
+        XMLUtils.addSaxString(contentHandler, "EXTRAOPTIONS",
+            Integer.toString(0));
+        appendRpcIdsToXml(contentHandler, rpcClientId, rpcCallId);
+        return;
+      }
+
+      XMLUtils.addSaxString(contentHandler, "EXTRAOPTIONS",
+          Integer.toString(extraOptions.size()));
+
+      for (Map.Entry<String, String> entry : extraOptions.entrySet()) {
+        contentHandler.startElement("", "", "EXTRAOPTION",
+            new AttributesImpl());
+        XMLUtils.addSaxString(contentHandler, "KEY", entry.getKey());
+        XMLUtils.addSaxString(contentHandler, "VALUE", entry.getValue());
+        contentHandler.endElement("", "", "EXTRAOPTION");
+      }
+      appendRpcIdsToXml(contentHandler, rpcClientId, rpcCallId);
+    }
+
+    @Override
+    void fromXml(Stanza st) throws InvalidXmlException {
+      final String codecName = st.getValue("CODEC");
+      final int dataUnits = Integer.parseInt(st.getValue("DATAUNITS"));
+      final int parityUnits = Integer.parseInt(st.getValue("PARITYUNITS"));
+      final int cellSize = Integer.parseInt(st.getValue("CELLSIZE"));
+      final int extraOptionNum = Integer.parseInt(st.getValue("EXTRAOPTIONS"));
+
+      ECSchema schema;
+      if (extraOptionNum == 0) {
+        schema = new ECSchema(codecName, dataUnits, parityUnits, null);
+      } else {
+        Map<String, String> extraOptions = new HashMap<String, String>();
+        List<Stanza> stanzas = st.getChildren("EXTRAOPTION");
+        for (Stanza a: stanzas) {
+          extraOptions.put(a.getValue("KEY"), a.getValue("VALUE"));
+        }
+        schema = new ECSchema(codecName, dataUnits, parityUnits, extraOptions);
+      }
+      this.ecPolicy = new ErasureCodingPolicy(schema, cellSize);
+      readRpcIdsFromXml(st);
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder builder = new StringBuilder();
+      builder.append("AddErasureCodingPolicy [")
+          .append(ecPolicy.toString());
+
+      appendRpcIdsToString(builder, rpcClientId, rpcCallId);
+      builder.append("]");
+      return builder.toString();
+    }
+  }
+
+  /**
+   * Operation corresponding to enable an erasure coding policy.
+   */
+  static class EnableErasureCodingPolicyOp extends FSEditLogOp {
+    private String ecPolicyName;
+
+    EnableErasureCodingPolicyOp() {
+      super(OP_ENABLE_ERASURE_CODING_POLICY);
+    }
+
+    static EnableErasureCodingPolicyOp getInstance(OpInstanceCache cache) {
+      return (EnableErasureCodingPolicyOp) cache
+          .get(OP_ENABLE_ERASURE_CODING_POLICY);
+    }
+
+    @Override
+    void resetSubFields() {
+      this.ecPolicyName = null;
+    }
+
+    public String getEcPolicy() {
+      return this.ecPolicyName;
+    }
+
+    public EnableErasureCodingPolicyOp setErasureCodingPolicy(
+        String policyName) {
+      Preconditions.checkNotNull(policyName);
+      this.ecPolicyName = policyName;
+      return this;
+    }
+
+    @Override
+    void readFields(DataInputStream in, int logVersion) throws IOException {
+      this.ecPolicyName = FSImageSerialization.readString(in);
+      readRpcIds(in, logVersion);
+    }
+
+    @Override
+    public void writeFields(DataOutputStream out) throws IOException {
+      Preconditions.checkNotNull(ecPolicyName);
+      FSImageSerialization.writeString(ecPolicyName, out);
+      writeRpcIds(rpcClientId, rpcCallId, out);
+    }
+
+    @Override
+    protected void toXml(ContentHandler contentHandler) throws SAXException {
+      Preconditions.checkNotNull(ecPolicyName);
+      XMLUtils.addSaxString(contentHandler, "POLICYNAME", this.ecPolicyName);
+      appendRpcIdsToXml(contentHandler, rpcClientId, rpcCallId);
+    }
+
+    @Override
+    void fromXml(Stanza st) throws InvalidXmlException {
+      this.ecPolicyName = st.getValue("POLICYNAME");
+      readRpcIdsFromXml(st);
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder builder = new StringBuilder();
+      builder.append("EnableErasureCodingPolicy [")
+          .append(ecPolicyName);
+
+      appendRpcIdsToString(builder, rpcClientId, rpcCallId);
+      builder.append("]");
+      return builder.toString();
+    }
+  }
+
+  /**
+   * Operation corresponding to disable an erasure coding policy.
+   */
+  static class DisableErasureCodingPolicyOp extends FSEditLogOp {
+    private String ecPolicyName;
+
+    DisableErasureCodingPolicyOp() {
+      super(OP_DISABLE_ERASURE_CODING_POLICY);
+    }
+
+    static DisableErasureCodingPolicyOp getInstance(OpInstanceCache cache) {
+      return (DisableErasureCodingPolicyOp) cache
+          .get(OP_DISABLE_ERASURE_CODING_POLICY);
+    }
+
+    @Override
+    void resetSubFields() {
+      this.ecPolicyName = null;
+    }
+
+    public String getEcPolicy() {
+      return this.ecPolicyName;
+    }
+
+    public DisableErasureCodingPolicyOp setErasureCodingPolicy(
+        String policyName) {
+      Preconditions.checkNotNull(policyName);
+      this.ecPolicyName = policyName;
+      return this;
+    }
+
+    @Override
+    void readFields(DataInputStream in, int logVersion) throws IOException {
+      this.ecPolicyName = FSImageSerialization.readString(in);
+      readRpcIds(in, logVersion);
+    }
+
+    @Override
+    public void writeFields(DataOutputStream out) throws IOException {
+      FSImageSerialization.writeString(ecPolicyName, out);
+      writeRpcIds(rpcClientId, rpcCallId, out);
+    }
+
+    @Override
+    protected void toXml(ContentHandler contentHandler) throws SAXException {
+      XMLUtils.addSaxString(contentHandler, "POLICYNAME", this.ecPolicyName);
+      appendRpcIdsToXml(contentHandler, rpcClientId, rpcCallId);
+    }
+
+    @Override
+    void fromXml(Stanza st) throws InvalidXmlException {
+      this.ecPolicyName = st.getValue("POLICYNAME");
+      readRpcIdsFromXml(st);
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder builder = new StringBuilder();
+      builder.append("DisableErasureCodingPolicy [")
+          .append(ecPolicyName);
+
+      appendRpcIdsToString(builder, rpcClientId, rpcCallId);
+      builder.append("]");
+      return builder.toString();
+    }
+  }
+
+  /**
+   * Operation corresponding to remove an erasure coding policy.
+   */
+  static class RemoveErasureCodingPolicyOp extends FSEditLogOp {
+    private String ecPolicyName;
+
+    RemoveErasureCodingPolicyOp() {
+      super(OP_REMOVE_ERASURE_CODING_POLICY);
+    }
+
+    static RemoveErasureCodingPolicyOp getInstance(OpInstanceCache cache) {
+      return (RemoveErasureCodingPolicyOp) cache
+          .get(OP_REMOVE_ERASURE_CODING_POLICY);
+    }
+
+    @Override
+    void resetSubFields() {
+      this.ecPolicyName = null;
+    }
+
+    public String getEcPolicy() {
+      return this.ecPolicyName;
+    }
+
+    public RemoveErasureCodingPolicyOp setErasureCodingPolicy(
+        String policyName) {
+      Preconditions.checkNotNull(policyName);
+      this.ecPolicyName = policyName;
+      return this;
+    }
+
+    @Override
+    void readFields(DataInputStream in, int logVersion) throws IOException {
+      this.ecPolicyName = FSImageSerialization.readString(in);
+      readRpcIds(in, logVersion);
+    }
+
+    @Override
+    public void writeFields(DataOutputStream out) throws IOException {
+      FSImageSerialization.writeString(ecPolicyName, out);
+      writeRpcIds(rpcClientId, rpcCallId, out);
+    }
+
+    @Override
+    protected void toXml(ContentHandler contentHandler) throws SAXException {
+      XMLUtils.addSaxString(contentHandler, "POLICYNAME", this.ecPolicyName);
+      appendRpcIdsToXml(contentHandler, rpcClientId, rpcCallId);
+    }
+
+    @Override
+    void fromXml(Stanza st) throws InvalidXmlException {
+      this.ecPolicyName = st.getValue("POLICYNAME");
+      readRpcIdsFromXml(st);
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder builder = new StringBuilder();
+      builder.append("RemoveErasureCodingPolicy [")
+          .append(ecPolicyName);
+
+      appendRpcIdsToString(builder, rpcClientId, rpcCallId);
+      builder.append("]");
+      return builder.toString();
+    }
+  }
+
   /**
    * Operation corresponding to upgrade
    */
@@ -4352,14 +4700,6 @@ public abstract class FSEditLogOp {
     public RollingUpgradeOp(FSEditLogOpCodes code, String name) {
       super(code);
       this.name = StringUtils.toUpperCase(name);
-    }
-
-    static RollingUpgradeOp getStartInstance(OpInstanceCache cache) {
-      return (RollingUpgradeOp) cache.get(OP_ROLLING_UPGRADE_START);
-    }
-
-    static RollingUpgradeOp getFinalizeInstance(OpInstanceCache cache) {
-      return (RollingUpgradeOp) cache.get(OP_ROLLING_UPGRADE_FINALIZE);
     }
 
     @Override
@@ -4452,15 +4792,15 @@ public abstract class FSEditLogOp {
     @Override
     public String toString() {
       StringBuilder builder = new StringBuilder();
-      builder.append("SetStoragePolicyOp [path=");
-      builder.append(path);
-      builder.append(", policyId=");
-      builder.append(policyId);
-      builder.append(", opCode=");
-      builder.append(opCode);
-      builder.append(", txid=");
-      builder.append(txid);
-      builder.append("]");
+      builder.append("SetStoragePolicyOp [path=")
+          .append(path)
+          .append(", policyId=")
+          .append(policyId)
+          .append(", opCode=")
+          .append(opCode)
+          .append(", txid=")
+          .append(txid)
+          .append("]");
       return builder.toString();
     }
 

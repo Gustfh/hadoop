@@ -19,6 +19,7 @@
 package org.apache.hadoop.fs;
 
 import java.io.DataInputStream;
+import java.io.EOFException;
 import java.io.FileDescriptor;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -38,7 +39,8 @@ import org.apache.hadoop.util.IdentityHashStore;
 public class FSDataInputStream extends DataInputStream
     implements Seekable, PositionedReadable, 
       ByteBufferReadable, HasFileDescriptor, CanSetDropBehind, CanSetReadahead,
-      HasEnhancedByteBufferAccess, CanUnbuffer {
+      HasEnhancedByteBufferAccess, CanUnbuffer, StreamCapabilities,
+      ByteBufferPositionedReadable {
   /**
    * Map ByteBuffers that we have handed out to readers to ByteBufferPool 
    * objects
@@ -147,7 +149,8 @@ public class FSDataInputStream extends DataInputStream
       return ((ByteBufferReadable)in).read(buf);
     }
 
-    throw new UnsupportedOperationException("Byte-buffer read unsupported by input stream");
+    throw new UnsupportedOperationException("Byte-buffer read unsupported " +
+            "by input stream");
   }
 
   @Override
@@ -227,11 +230,32 @@ public class FSDataInputStream extends DataInputStream
 
   @Override
   public void unbuffer() {
-    try {
-      ((CanUnbuffer)in).unbuffer();
-    } catch (ClassCastException e) {
-      throw new UnsupportedOperationException("this stream does not " +
-          "support unbuffering.");
+    StreamCapabilitiesPolicy.unbuffer(in);
+  }
+
+  @Override
+  public boolean hasCapability(String capability) {
+    if (in instanceof StreamCapabilities) {
+      return ((StreamCapabilities) in).hasCapability(capability);
     }
+    return false;
+  }
+
+  /**
+   * String value. Includes the string value of the inner stream
+   * @return the stream
+   */
+  @Override
+  public String toString() {
+    return super.toString() + ": " + in;
+  }
+
+  @Override
+  public int read(long position, ByteBuffer buf) throws IOException {
+    if (in instanceof ByteBufferPositionedReadable) {
+      return ((ByteBufferPositionedReadable) in).read(position, buf);
+    }
+    throw new UnsupportedOperationException("Byte-buffer pread unsupported " +
+        "by input stream");
   }
 }

@@ -19,7 +19,6 @@ package org.apache.hadoop.util;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
-import org.codehaus.jackson.map.ObjectMapper;
 
 import javax.servlet.http.HttpServletResponse;
 import javax.ws.rs.core.MediaType;
@@ -35,10 +34,10 @@ import java.util.Map;
 /**
  * HTTP utility class to help propagate server side exception to the client
  * over HTTP as a JSON payload.
- * <p/>
+ * <p>
  * It creates HTTP Servlet and JAX-RPC error responses including details of the
  * exception that allows a client to recreate the remote exception.
- * <p/>
+ * <p>
  * It parses HTTP client connections and recreates the exception.
  */
 @InterfaceAudience.Private
@@ -74,9 +73,8 @@ public class HttpExceptionUtils {
     json.put(ERROR_CLASSNAME_JSON, ex.getClass().getName());
     Map<String, Object> jsonResponse = new LinkedHashMap<String, Object>();
     jsonResponse.put(ERROR_JSON, json);
-    ObjectMapper jsonMapper = new ObjectMapper();
     Writer writer = response.getWriter();
-    jsonMapper.writerWithDefaultPrettyPrinter().writeValue(writer, jsonResponse);
+    JsonSerialization.writer().writeValue(writer, jsonResponse);
     writer.flush();
   }
 
@@ -127,7 +125,7 @@ public class HttpExceptionUtils {
    * expected HTTP status code. If the current status code is not the expected
    * one it throws an exception with a detail message using Server side error
    * messages if available.
-   * <p/>
+   * <p>
    * <b>NOTE:</b> this method will throw the deserialized exception even if not
    * declared in the <code>throws</code> of the method signature.
    *
@@ -144,8 +142,7 @@ public class HttpExceptionUtils {
       InputStream es = null;
       try {
         es = conn.getErrorStream();
-        ObjectMapper mapper = new ObjectMapper();
-        Map json = mapper.readValue(es, Map.class);
+        Map json = JsonSerialization.mapReader().readValue(es);
         json = (Map) json.get(ERROR_JSON);
         String exClass = (String) json.get(ERROR_CLASSNAME_JSON);
         String exMsg = (String) json.get(ERROR_MESSAGE_JSON);

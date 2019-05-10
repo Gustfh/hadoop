@@ -35,6 +35,7 @@ import org.apache.hadoop.http.HtmlQuoting;
 import org.apache.hadoop.yarn.webapp.Controller.RequestContext;
 import org.apache.hadoop.yarn.webapp.Router.Dest;
 import org.apache.hadoop.yarn.webapp.view.ErrorPage;
+import org.apache.hadoop.yarn.webapp.view.RobotsTextPage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -117,6 +118,14 @@ public class Dispatcher extends HttpServlet {
     }
     Controller.RequestContext rc =
         injector.getInstance(Controller.RequestContext.class);
+
+    //short-circuit robots.txt serving for all YARN webapps.
+    if (uri.equals(RobotsTextPage.ROBOTS_TXT_PATH)) {
+      rc.setStatus(HttpServletResponse.SC_FOUND);
+      render(RobotsTextPage.class);
+      return;
+    }
+
     if (setCookieParams(rc, req) > 0) {
       Cookie ec = rc.cookies().get(ERROR_COOKIE);
       if (ec != null) {
@@ -170,10 +179,10 @@ public class Dispatcher extends HttpServlet {
     String st = devMode ? ErrorPage.toStackTrace(e, 1024 * 3) // spec: min 4KB
                         : "See logs for stack trace";
     res.setStatus(res.SC_FOUND);
-    Cookie cookie = new Cookie(STATUS_COOKIE, String.valueOf(500));
+    Cookie cookie = createCookie(STATUS_COOKIE, String.valueOf(500));
     cookie.setPath(path);
     res.addCookie(cookie);
-    cookie = new Cookie(ERROR_COOKIE, st);
+    cookie = createCookie(ERROR_COOKIE, st);
     cookie.setPath(path);
     res.addCookie(cookie);
     res.setHeader("Location", path);
@@ -187,7 +196,7 @@ public class Dispatcher extends HttpServlet {
   public static void removeCookie(HttpServletResponse res, String name,
                                   String path) {
     LOG.debug("removing cookie {} on {}", name, path);
-    Cookie c = new Cookie(name, "");
+    Cookie c = createCookie(name, "");
     c.setMaxAge(0);
     c.setPath(path);
     res.addCookie(c);
@@ -239,5 +248,11 @@ public class Dispatcher extends HttpServlet {
         System.exit(0); // FINDBUG: this is intended in dev mode
       }
     }, 18); // enough time for the last local request to complete
+  }
+
+  private static Cookie createCookie(String name, String val) {
+    Cookie cookie = new Cookie(name, val);
+    cookie.setHttpOnly(true);
+    return cookie;
   }
 }

@@ -18,14 +18,17 @@
 package org.apache.hadoop.io.compress;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 
-import org.apache.hadoop.conf.Configuration;
 import org.junit.Test;
 
 public class TestBlockDecompressorStream {
@@ -67,187 +70,37 @@ public class TestBlockDecompressorStream {
     bytesIn = new ByteArrayInputStream(buf);
     
     // get decompression stream
-    BlockDecompressorStream blockDecompressorStream = 
-      new BlockDecompressorStream(bytesIn, new FakeDecompressor(), 1024);
-    try {
+    try (BlockDecompressorStream blockDecompressorStream =
+      new BlockDecompressorStream(bytesIn, new FakeDecompressor(), 1024)) {
       assertEquals("return value is not -1", 
           -1 , blockDecompressorStream.read());
     } catch (IOException e) {
       fail("unexpected IOException : " + e);
-    } finally {
-      blockDecompressorStream.close();
     }
   }
-}
 
-/**
- * A fake compressor
- * Its input and output is the same.
- */
-class FakeCompressor implements Compressor{
+  @Test
+  public void testReadWhenIoExceptionOccure() throws IOException {
+    File file = new File("testReadWhenIOException");
+    try {
+      file.createNewFile();
+      InputStream io = new FileInputStream(file) {
+        @Override
+        public int read() throws IOException {
+          throw new IOException("File blocks missing");
+        }
+      };
 
-  private boolean finish;
-  private boolean finished;
-  int nread;
-  int nwrite;
-  
-  byte [] userBuf;
-  int userBufOff;
-  int userBufLen;
-  
-  @Override
-  public int compress(byte[] b, int off, int len) throws IOException {
-    int n = Math.min(len, userBufLen);
-    if (userBuf != null && b != null)
-      System.arraycopy(userBuf, userBufOff, b, off, n);
-    userBufOff += n;
-    userBufLen -= n;
-    nwrite += n;
-    
-    if (finish && userBufLen <= 0)
-      finished = true;   
-        
-    return n;
+      try (BlockDecompressorStream blockDecompressorStream =
+          new BlockDecompressorStream(io, new FakeDecompressor(), 1024)) {
+        int byteRead = blockDecompressorStream.read();
+        fail("Should not return -1 in case of IOException. Byte read "
+            + byteRead);
+      } catch (IOException e) {
+        assertTrue(e.getMessage().contains("File blocks missing"));
+      }
+    } finally {
+      file.delete();
+    }
   }
-
-  @Override
-  public void end() {
-    // nop
-  }
-
-  @Override
-  public void finish() {
-    finish = true;
-  }
-
-  @Override
-  public boolean finished() {
-    return finished;
-  }
-
-  @Override
-  public long getBytesRead() {
-    return nread;
-  }
-
-  @Override
-  public long getBytesWritten() {
-    return nwrite;
-  }
-
-  @Override
-  public boolean needsInput() {
-    return userBufLen <= 0;
-  }
-
-  @Override
-  public void reset() {
-    finish = false;
-    finished = false;
-    nread = 0;
-    nwrite = 0;
-    userBuf = null;
-    userBufOff = 0;
-    userBufLen = 0;
-  }
-
-  @Override
-  public void setDictionary(byte[] b, int off, int len) {
-    // nop
-  }
-
-  @Override
-  public void setInput(byte[] b, int off, int len) {
-    nread += len;
-    userBuf = b;
-    userBufOff = off;
-    userBufLen = len;
-  }
-
-  @Override
-  public void reinit(Configuration conf) {
-    // nop
-  }
-  
-}
-
-/**
- * A fake decompressor, just like FakeCompressor
- * Its input and output is the same.
- */
-class FakeDecompressor implements Decompressor {
-  
-  private boolean finish;
-  private boolean finished;
-  int nread;
-  int nwrite;
-  
-  byte [] userBuf;
-  int userBufOff;
-  int userBufLen;
-
-  @Override
-  public int decompress(byte[] b, int off, int len) throws IOException {
-    int n = Math.min(len, userBufLen);
-    if (userBuf != null && b != null)
-      System.arraycopy(userBuf, userBufOff, b, off, n);
-    userBufOff += n;
-    userBufLen -= n;
-    nwrite += n;
-    
-    if (finish && userBufLen <= 0)
-      finished = true;
-    
-    return n;
-  }
-
-  @Override
-  public void end() {
-    // nop
-  }
-
-  @Override
-  public boolean finished() {
-    return finished;
-  }
-
-  @Override
-  public boolean needsDictionary() {
-    return false;
-  }
-
-  @Override
-  public boolean needsInput() {
-    return userBufLen <= 0;
-  }
-
-  @Override
-  public void reset() {
-    finish = false;
-    finished = false;
-    nread = 0;
-    nwrite = 0;
-    userBuf = null;
-    userBufOff = 0;
-    userBufLen = 0;
-  }
-
-  @Override
-  public void setDictionary(byte[] b, int off, int len) {
-    // nop
-  }
-
-  @Override
-  public void setInput(byte[] b, int off, int len) {
-    nread += len;
-    userBuf = b;
-    userBufOff = off;
-    userBufLen = len;
-  }
-
-  @Override
-  public int getRemaining() {
-    return 0;
-  }
-  
 }

@@ -39,7 +39,6 @@ import java.net.InetSocketAddress;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.Map;
-import java.util.Set;
 
 import com.google.common.base.Predicate;
 
@@ -48,13 +47,11 @@ import org.apache.hadoop.hdfs.util.CombinedHostsFileReader;
 /**
  * This class manages datanode configuration using a json file.
  * Please refer to {@link CombinedHostsFileReader} for the json format.
- * <p/>
- * <p/>
+ * <p>
  * Entries may or may not specify a port.  If they don't, we consider
  * them to apply to every DataNode on that host. The code canonicalizes the
  * entries into IP addresses.
- * <p/>
- * <p/>
+ * <p>
  * The code ignores all entries that the DNS fails to resolve their IP
  * addresses. This is okay because by default the NN rejects the registrations
  * of DNs when it fails to do a forward and reverse lookup. Note that DNS
@@ -148,6 +145,24 @@ public class CombinedHostFileManager extends HostConfigManager {
       };
     }
 
+    synchronized long getMaintenanceExpireTimeInMS(
+        final InetSocketAddress address) {
+      Iterable<DatanodeAdminProperties> datanode = Iterables.filter(
+          allDNs.get(address.getAddress()),
+          new Predicate<DatanodeAdminProperties>() {
+            public boolean apply(DatanodeAdminProperties input) {
+              return input.getAdminState().equals(
+                  AdminStates.IN_MAINTENANCE) &&
+                  (input.getPort() == 0 ||
+                  input.getPort() == address.getPort());
+            }
+          });
+      // if DN isn't set to maintenance state, ignore MaintenanceExpireTimeInMS
+      // set in the config.
+      return datanode.iterator().hasNext() ?
+          datanode.iterator().next().getMaintenanceExpireTimeInMS() : 0;
+    }
+
     static class HostIterator extends UnmodifiableIterator<InetSocketAddress> {
       private final Iterator<Map.Entry<InetAddress,
           DatanodeAdminProperties>> it;
@@ -194,7 +209,7 @@ public class CombinedHostFileManager extends HostConfigManager {
   }
   private void refresh(final String hostsFile) throws IOException {
     HostProperties hostProps = new HostProperties();
-    Set<DatanodeAdminProperties> all =
+    DatanodeAdminProperties[] all =
         CombinedHostsFileReader.readFile(hostsFile);
     for(DatanodeAdminProperties properties : all) {
       InetSocketAddress addr = parseEntry(hostsFile,
@@ -234,6 +249,11 @@ public class CombinedHostFileManager extends HostConfigManager {
   @Override
   public synchronized String getUpgradeDomain(final DatanodeID dn) {
     return hostProperties.getUpgradeDomain(dn.getResolvedAddress());
+  }
+
+  @Override
+  public long getMaintenanceExpirationTimeInMS(DatanodeID dn) {
+    return hostProperties.getMaintenanceExpireTimeInMS(dn.getResolvedAddress());
   }
 
   /**

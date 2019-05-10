@@ -50,6 +50,7 @@ import org.apache.hadoop.security.authentication.server.AuthenticationFilter;
 import org.apache.hadoop.security.authentication.server.KerberosAuthenticationHandler;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.delegation.web.DelegationTokenAuthenticator;
+import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.security.client.RMDelegationTokenIdentifier;
 import org.apache.hadoop.yarn.server.resourcemanager.MockRM;
@@ -57,7 +58,6 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fifo.FifoScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.ApplicationSubmissionContextInfo;
-import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.AfterClass;
 import org.junit.Assert;
@@ -65,6 +65,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import com.sun.jersey.api.client.ClientResponse.Status;
+import static org.apache.hadoop.yarn.conf.YarnConfiguration.RM_PROXY_USER_PREFIX;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
@@ -75,6 +76,8 @@ public class TestRMWebServicesDelegationTokenAuthentication {
     TestRMWebServicesDelegationTokenAuthentication.class.getName() + "-root");
   private static File httpSpnegoKeytabFile = new File(
     KerberosTestUtils.getKeytabFile());
+  private static final String SUN_SECURITY_KRB5_RCACHE_KEY =
+      "sun.security.krb5.rcache";
 
   private static String httpSpnegoPrincipal = KerberosTestUtils
     .getServerPrincipal();
@@ -82,7 +85,7 @@ public class TestRMWebServicesDelegationTokenAuthentication {
   private static boolean miniKDCStarted = false;
   private static MiniKdc testMiniKDC;
   private static MockRM rm;
-
+  private static String sunSecurityKrb5RcacheValue;
 
   String delegationTokenHeader;
 
@@ -97,6 +100,11 @@ public class TestRMWebServicesDelegationTokenAuthentication {
   @BeforeClass
   public static void setUp() {
     try {
+      // Disabling kerberos replay cache to avoid "Request is a replay" errors
+      // caused by frequent webservice calls
+      sunSecurityKrb5RcacheValue =
+          System.getProperty(SUN_SECURITY_KRB5_RCACHE_KEY);
+      System.setProperty(SUN_SECURITY_KRB5_RCACHE_KEY, "none");
       testMiniKDC = new MiniKdc(MiniKdc.createConf(), testRootDir);
       setupKDC();
       setupAndStartRM();
@@ -112,6 +120,12 @@ public class TestRMWebServicesDelegationTokenAuthentication {
     }
     if (rm != null) {
       rm.stop();
+    }
+    if (sunSecurityKrb5RcacheValue == null) {
+      System.clearProperty(SUN_SECURITY_KRB5_RCACHE_KEY);
+    } else {
+      System.setProperty(SUN_SECURITY_KRB5_RCACHE_KEY,
+          sunSecurityKrb5RcacheValue);
     }
   }
 
@@ -158,8 +172,8 @@ public class TestRMWebServicesDelegationTokenAuthentication {
     rmconf.set(YarnConfiguration.NM_WEBAPP_SPNEGO_KEYTAB_FILE_KEY,
       httpSpnegoKeytabFile.getAbsolutePath());
     rmconf.setBoolean("mockrm.webapp.enabled", true);
-    rmconf.set("yarn.resourcemanager.proxyuser.client.hosts", "*");
-    rmconf.set("yarn.resourcemanager.proxyuser.client.groups", "*");
+    rmconf.set(RM_PROXY_USER_PREFIX + "client.hosts", "*");
+    rmconf.set(RM_PROXY_USER_PREFIX + "client.groups", "*");
     UserGroupInformation.setConfiguration(rmconf);
     rm = new MockRM(rmconf);
     rm.start();
@@ -236,11 +250,11 @@ public class TestRMWebServicesDelegationTokenAuthentication {
 
     boolean appExists =
         rm.getRMContext().getRMApps()
-          .containsKey(ConverterUtils.toApplicationId(appid));
+          .containsKey(ApplicationId.fromString(appid));
     assertTrue(appExists);
     RMApp actualApp =
         rm.getRMContext().getRMApps()
-          .get(ConverterUtils.toApplicationId(appid));
+          .get(ApplicationId.fromString(appid));
     String owner = actualApp.getUser();
     assertEquals("client", owner);
   }

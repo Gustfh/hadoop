@@ -54,8 +54,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.apache.commons.io.FileUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.ChecksumException;
 import org.apache.hadoop.fs.FileSystem;
@@ -81,6 +81,8 @@ import org.apache.hadoop.hdfs.util.XMLUtils.Stanza;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.test.PathUtils;
+import org.apache.hadoop.util.ExitUtil;
+import org.apache.hadoop.util.ExitUtil.ExitException;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Time;
 import org.apache.log4j.Level;
@@ -130,7 +132,7 @@ public class TestEditLog {
 
   /**
    * A garbage mkdir op which is used for testing
-   * {@link EditLogFileInputStream#scanEditLog(File)}
+   * {@link EditLogFileInputStream#scanEditLog(File, long, boolean)}
    */
   public static class GarbageMkdirOp extends FSEditLogOp {
     public GarbageMkdirOp() {
@@ -168,7 +170,7 @@ public class TestEditLog {
     }
   }
 
-  static final Log LOG = LogFactory.getLog(TestEditLog.class);
+  static final Logger LOG = LoggerFactory.getLogger(TestEditLog.class);
   
   static final int NUM_DATA_NODES = 0;
 
@@ -288,7 +290,8 @@ public class TestEditLog {
       long numEdits = testLoad(HADOOP20_SOME_EDITS, namesystem);
       assertEquals(3, numEdits);
       // Sanity check the edit
-      HdfsFileStatus fileInfo = namesystem.getFileInfo("/myfile", false);
+      HdfsFileStatus fileInfo =
+          namesystem.getFileInfo("/myfile", false, false, false);
       assertEquals("supergroup", fileInfo.getGroup());
       assertEquals(3, fileInfo.getReplication());
     } finally {
@@ -591,9 +594,12 @@ public class TestEditLog {
 
       // Log an edit from thread A
       doLogEdit(threadA, editLog, "thread-a 1");
-      assertEquals("logging edit without syncing should do not affect txid",
-        1, editLog.getSyncTxId());
-
+      // async log is doing batched syncs in background.  logSync just ensures
+      // the edit is durable, so the txid may increase prior to sync
+      if (!useAsyncEditLog) {
+        assertEquals("logging edit without syncing should do not affect txid",
+            1, editLog.getSyncTxId());
+      }
       // logSyncAll in Thread B
       doCallLogSyncAll(threadB, editLog);
       assertEquals("logSyncAll should sync thread A's transaction",
@@ -970,17 +976,19 @@ public class TestEditLog {
   public void testFailedOpen() throws Exception {
     File logDir = new File(TEST_DIR, "testFailedOpen");
     logDir.mkdirs();
+    ExitUtil.disableSystemExit();
     FSEditLog log = FSImageTestUtil.createStandaloneEditLog(logDir);
     try {
       FileUtil.setWritable(logDir, false);
       log.openForWrite(NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION);
       fail("Did no throw exception on only having a bad dir");
-    } catch (IOException ioe) {
+    } catch (ExitException ee) {
       GenericTestUtils.assertExceptionContains(
-          "too few journals successfully started", ioe);
+          "too few journals successfully started", ee);
     } finally {
       FileUtil.setWritable(logDir, true);
       log.close();
+      ExitUtil.resetFirstExitException();
     }
   }
   
@@ -1034,9 +1042,9 @@ public class TestEditLog {
         "[1,100]|[101,200]|[201,]");
     log = getFSEditLog(storage);
     log.initJournalsForWrite();
-    assertEquals("[[1,100], [101,200]]",
+    assertEquals("[[1,100], [101,200]] CommittedTxId: 200",
         log.getEditLogManifest(1).toString());
-    assertEquals("[[101,200]]",
+    assertEquals("[[101,200]] CommittedTxId: 200",
         log.getEditLogManifest(101).toString());
 
     // Another simple case, different directories have different
@@ -1046,8 +1054,8 @@ public class TestEditLog {
         "[1,100]|[201,300]|[301,400]"); // nothing starting at 101
     log = getFSEditLog(storage);
     log.initJournalsForWrite();
-    assertEquals("[[1,100], [101,200], [201,300], [301,400]]",
-        log.getEditLogManifest(1).toString());
+    assertEquals("[[1,100], [101,200], [201,300], [301,400]]" +
+            " CommittedTxId: 400", log.getEditLogManifest(1).toString());
     
     // Case where one directory has an earlier finalized log, followed
     // by a gap. The returned manifest should start after the gap.
@@ -1056,7 +1064,7 @@ public class TestEditLog {
         "[301,400]|[401,500]");
     log = getFSEditLog(storage);
     log.initJournalsForWrite();
-    assertEquals("[[301,400], [401,500]]",
+    assertEquals("[[301,400], [401,500]] CommittedTxId: 500",
         log.getEditLogManifest(1).toString());
     
     // Case where different directories have different length logs
@@ -1066,9 +1074,9 @@ public class TestEditLog {
         "[1,50]|[101,200]"); // short log at 1
     log = getFSEditLog(storage);
     log.initJournalsForWrite();
-    assertEquals("[[1,100], [101,200]]",
+    assertEquals("[[1,100], [101,200]] CommittedTxId: 200",
         log.getEditLogManifest(1).toString());
-    assertEquals("[[101,200]]",
+    assertEquals("[[101,200]] CommittedTxId: 200",
         log.getEditLogManifest(101).toString());
 
     // Case where the first storage has an inprogress while
@@ -1079,9 +1087,9 @@ public class TestEditLog {
         "[1,100]|[101,200]"); 
     log = getFSEditLog(storage);
     log.initJournalsForWrite();
-    assertEquals("[[1,100], [101,200]]",
+    assertEquals("[[1,100], [101,200]] CommittedTxId: 200",
         log.getEditLogManifest(1).toString());
-    assertEquals("[[101,200]]",
+    assertEquals("[[101,200]] CommittedTxId: 200",
         log.getEditLogManifest(101).toString());
   }
   
@@ -1138,7 +1146,7 @@ public class TestEditLog {
     /**
      * Construct the failure specification. 
      * @param roll number to fail after. e.g. 1 to fail after the first roll
-     * @param loginfo index of journal to fail. 
+     * @param logindex index of journal to fail.
      */
     AbortSpec(int roll, int logindex) {
       this.roll = roll;
@@ -1592,7 +1600,7 @@ public class TestEditLog {
       fileSys.create(file2).close();
 
       // Restart and assert the above stated expectations.
-      IOUtils.cleanup(LOG, fileSys);
+      IOUtils.cleanupWithLogger(LOG, fileSys);
       cluster.restartNameNode();
       fileSys = cluster.getFileSystem();
       assertFalse(fileSys.getAclStatus(dir1).getEntries().isEmpty());
@@ -1601,7 +1609,7 @@ public class TestEditLog {
       assertTrue(fileSys.getAclStatus(dir3).getEntries().isEmpty());
       assertTrue(fileSys.getAclStatus(file2).getEntries().isEmpty());
     } finally {
-      IOUtils.cleanup(LOG, fileSys);
+      IOUtils.cleanupWithLogger(LOG, fileSys);
       if (cluster != null) {
         cluster.shutdown();
       }

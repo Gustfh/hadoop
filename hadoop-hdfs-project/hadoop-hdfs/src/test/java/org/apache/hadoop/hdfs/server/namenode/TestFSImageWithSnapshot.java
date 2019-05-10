@@ -41,12 +41,13 @@ import org.apache.hadoop.hdfs.client.HdfsDataOutputStream.SyncFlag;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeFile;
+import org.apache.hadoop.hdfs.server.namenode.snapshot.DiffList;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.DirectoryWithSnapshotFeature.DirectoryDiff;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.Snapshot;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.SnapshotTestHelper;
 import org.apache.hadoop.hdfs.util.Canceler;
 import org.apache.hadoop.test.GenericTestUtils;
-import org.apache.log4j.Level;
+import org.slf4j.event.Level;
 
 import org.junit.After;
 import org.junit.Assert;
@@ -59,7 +60,7 @@ import org.junit.Test;
 public class TestFSImageWithSnapshot {
   {
     SnapshotTestHelper.disableLogs();
-    GenericTestUtils.setLogLevel(INode.LOG, Level.ALL);
+    GenericTestUtils.setLogLevel(INode.LOG, Level.TRACE);
   }
 
   static final long seed = 0;
@@ -69,8 +70,8 @@ public class TestFSImageWithSnapshot {
 
   private final Path dir = new Path("/TestSnapshot");
   private static final String testDir =
-      System.getProperty("test.build.data", "build/test/data");
-  
+      GenericTestUtils.getTestDir().getAbsolutePath();
+
   Configuration conf;
   MiniDFSCluster cluster;
   FSNamesystem fsn;
@@ -199,7 +200,7 @@ public class TestFSImageWithSnapshot {
     assertTrue("The children list of root should be empty", 
         rootNode.getChildrenList(Snapshot.CURRENT_STATE_ID).isEmpty());
     // one snapshot on root: s1
-    List<DirectoryDiff> diffList = rootNode.getDiffs().asList();
+    DiffList<DirectoryDiff> diffList = rootNode.getDiffs().asList();
     assertEquals(1, diffList.size());
     Snapshot s1 = rootNode.getSnapshot(DFSUtil.string2Bytes("s1"));
     assertEquals(s1.getId(), diffList.get(0).getSnapshotId());

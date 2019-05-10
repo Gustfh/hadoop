@@ -64,7 +64,15 @@ public class BlockScanner {
   /**
    * The scanner configuration.
    */
-  private final Conf conf;
+  private Conf conf;
+
+  @VisibleForTesting
+  void setConf(Conf conf) {
+    this.conf = conf;
+    for (Entry<String, VolumeScanner> entry : scanners.entrySet()) {
+      entry.getValue().setConf(conf);
+    }
+  }
 
   /**
    * The cached scanner configuration.
@@ -165,6 +173,10 @@ public class BlockScanner {
     }
   }
 
+  public BlockScanner(DataNode datanode) {
+    this(datanode, datanode.getConf());
+  }
+
   public BlockScanner(DataNode datanode, Configuration conf) {
     this.datanode = datanode;
     this.conf = new Conf(conf);
@@ -177,7 +189,7 @@ public class BlockScanner {
   }
 
   /**
-   * Returns true if the block scanner is enabled.<p/>
+   * Returns true if the block scanner is enabled.
    *
    * If the block scanner is disabled, no volume scanners will be created, and
    * no threads will start.
@@ -197,17 +209,17 @@ public class BlockScanner {
       FsVolumeSpi volume = ref.getVolume();
       if (!isEnabled()) {
         LOG.debug("Not adding volume scanner for {}, because the block " +
-            "scanner is disabled.", volume.getBasePath());
+            "scanner is disabled.", volume);
         return;
       }
       VolumeScanner scanner = scanners.get(volume.getStorageID());
       if (scanner != null) {
         LOG.error("Already have a scanner for volume {}.",
-            volume.getBasePath());
+            volume);
         return;
       }
       LOG.debug("Adding scanner for volume {} (StorageID {})",
-          volume.getBasePath(), volume.getStorageID());
+          volume, volume.getStorageID());
       scanner = new VolumeScanner(conf, datanode, ref);
       scanner.start();
       scanners.put(volume.getStorageID(), scanner);
@@ -222,7 +234,7 @@ public class BlockScanner {
   }
 
   /**
-   * Stops and removes a volume scanner.<p/>
+   * Stops and removes a volume scanner.
    *
    * This function will block until the volume scanner has stopped.
    *
@@ -241,14 +253,14 @@ public class BlockScanner {
       return;
     }
     LOG.info("Removing scanner for volume {} (StorageID {})",
-        volume.getBasePath(), volume.getStorageID());
+        volume, volume.getStorageID());
     scanner.shutdown();
     scanners.remove(volume.getStorageID());
     Uninterruptibles.joinUninterruptibly(scanner, 5, TimeUnit.MINUTES);
   }
 
   /**
-   * Stops and removes all volume scanners.<p/>
+   * Stops and removes all volume scanners.
    *
    * This function will block until all the volume scanners have stopped.
    */

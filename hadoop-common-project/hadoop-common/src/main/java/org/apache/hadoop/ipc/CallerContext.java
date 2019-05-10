@@ -17,8 +17,8 @@
  */
 package org.apache.hadoop.ipc;
 
-import org.apache.commons.lang.builder.EqualsBuilder;
-import org.apache.commons.lang.builder.HashCodeBuilder;
+import org.apache.commons.lang3.builder.EqualsBuilder;
+import org.apache.commons.lang3.builder.HashCodeBuilder;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 
@@ -32,10 +32,9 @@ import java.util.Arrays;
  *
  * This class is immutable.
  */
-@InterfaceAudience.LimitedPrivate({"HBase", "HDFS", "Hive", "MapReduce",
-    "Pig", "YARN"})
+@InterfaceAudience.Public
 @InterfaceStability.Evolving
-public class CallerContext {
+public final class CallerContext {
   public static final Charset SIGNATURE_ENCODING = StandardCharsets.UTF_8;
   /** The caller context.
    *
@@ -54,7 +53,7 @@ public class CallerContext {
    */
   private final byte[] signature;
 
-  public CallerContext(Builder builder) {
+  private CallerContext(Builder builder) {
     this.context = builder.context;
     this.signature = builder.signature;
   }
@@ -131,7 +130,7 @@ public class CallerContext {
 
   /**
    * The thread local current caller context.
-   * <p/>
+   * <p>
    * Internal class for defered singleton idiom.
    * https://en.wikipedia.org/wiki/Initialization_on_demand_holder_idiom
    */

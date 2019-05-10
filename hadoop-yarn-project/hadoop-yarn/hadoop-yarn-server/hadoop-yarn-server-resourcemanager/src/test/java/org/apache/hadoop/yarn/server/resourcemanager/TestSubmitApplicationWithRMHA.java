@@ -20,8 +20,8 @@ package org.apache.hadoop.yarn.server.resourcemanager;
 
 import org.junit.Assert;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationReport;
@@ -34,8 +34,8 @@ import org.junit.Test;
 
 public class TestSubmitApplicationWithRMHA extends RMHATestBase{
 
-  public static final Log LOG = LogFactory
-      .getLog(TestSubmitApplicationWithRMHA.class);
+  public static final Logger LOG = LoggerFactory
+      .getLogger(TestSubmitApplicationWithRMHA.class);
 
   @Test
   public void
@@ -224,7 +224,7 @@ public class TestSubmitApplicationWithRMHA extends RMHATestBase{
   // during SubmitApplication Call:
   // 1) RMStateStore already saved the ApplicationState when failover happens
   // 2) RMStateStore did not save the ApplicationState when failover happens
-  @Test (timeout = 5000)
+  @Test (timeout = 50000)
   public void
       testHandleRMHADuringSubmitApplicationCallWithSavedApplicationState()
           throws Exception {
@@ -260,7 +260,7 @@ public class TestSubmitApplicationWithRMHA extends RMHATestBase{
     Assert.assertEquals(app1.getApplicationId(), app0.getApplicationId());
   }
 
-  @Test (timeout = 5000)
+  @Test (timeout = 50000)
   public void
       testHandleRMHADuringSubmitApplicationCallWithoutSavedApplicationState()
           throws Exception {

@@ -15,11 +15,7 @@
 Reservation System
 ==================
 
-
-* [Purpose](#Purpose)
-* [Overview](#Overview)
-* [Flow of a Reservation](#Flow_of_a_Reservation)
-* [Configuring the Reservation System](#Configuring_the_Reservation_System)
+<!-- MACRO{toc|fromDepth=0|toDepth=3} -->
 
 Purpose
 -------
@@ -39,7 +35,9 @@ Flow of a Reservation
 
 With reference to the figure above, a typical reservation proceeds as follows:
 
- * **Step 1**  The user (or an automated tool on its behalf) submit a reservation request specified by the Reservation Definition Language (RDL). This describes the user need for resources over-time (e.g., a skyline of resources) and temporal constraints (e.g., deadline). This can be done both programmatically through the usual Client-to-RM protocols or via the REST api of the RM.
+ * **Step 0**  The user (or an automated tool on its behalf) submits a reservation creation request, and receives a response containing the ReservationId.
+
+ * **Step 1**  The user (or an automated tool on its behalf) submits a reservation request specified by the Reservation Definition Language (RDL) and ReservationId retrieved from the previous step. This describes the user need for resources over-time (e.g., a skyline of resources) and temporal constraints (e.g., deadline). This can be done both programmatically through the usual Client-to-RM protocols or via the REST api of the RM. If a reservation is submitted with the same ReservationId, and the RDL is the same, a new reservation will not be created and the request will be successful. If the RDL is different, the reservation will be rejected, and the request will be unsuccessful.
 
  * **Step 2**  The ReservationSystem leverages a ReservationAgent (GREE in the figure) to find a plausible allocation for the reservation in the Plan, a data structure tracking all reservation currently accepted and the available resources in the system.
 
@@ -62,4 +60,4 @@ With reference to the figure above, a typical reservation proceeds as follows:
 Configuring the Reservation System
 ----------------------------------
 
-Configuring the `ReservationSystem` is simple. Currently we have added support for *reservations* in both `CapacityScheduler` and `FairScheduler`. You can mark any **leaf queue** in the **capacity-scheduler.xml** or **fair-scheduler.xml** as available for "reservations" (see [CapacityScheduler](http://hadoop.apache.org/docs/current/hadoop-yarn/hadoop-yarn-site/CapacityScheduler.html#Configuring_ReservationSystem_with_CapacityScheduler) and the [FairScheduler](http://hadoop.apache.org/docs/current/hadoop-yarn/hadoop-yarn-site/FairScheduler.html) for details). Then the capacity/fair share within that queue can be used for making reservations. Jobs can still be submitted to the *reservable queue* without a reservation, in which case they will be run in best-effort mode in whatever capacity is left over by the jobs running within active reservations.
+Configuring the `ReservationSystem` is simple. Currently we have added support for *reservations* in both `CapacityScheduler` and `FairScheduler`. You can mark any **leaf queue** in the **capacity-scheduler.xml** or **fair-scheduler.xml** as available for "reservations" (see [CapacityScheduler](./CapacityScheduler.html#Configuring_ReservationSystem_with_CapacityScheduler) and the [FairScheduler](./FairScheduler.html#Configuring_ReservationSystem) for details). Then the capacity/fair share within that queue can be used for making reservations. Jobs can still be submitted to the *reservable queue* without a reservation, in which case they will be run in best-effort mode in whatever capacity is left over by the jobs running within active reservations.

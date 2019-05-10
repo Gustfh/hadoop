@@ -13,8 +13,8 @@
  */
 package org.apache.hadoop.hdfs.server.datanode.web.webhdfs;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
@@ -43,7 +43,7 @@ public class DataNodeUGIProvider {
   private final ParameterParser params;
   @VisibleForTesting
   static Cache<String, UserGroupInformation> ugiCache;
-  public static final Log LOG = LogFactory.getLog(Client.class);
+  public static final Logger LOG = LoggerFactory.getLogger(Client.class);
 
   DataNodeUGIProvider(ParameterParser params) {
     this.params = params;
@@ -58,6 +58,13 @@ public class DataNodeUGIProvider {
                   DFSConfigKeys.DFS_WEBHDFS_UGI_EXPIRE_AFTER_ACCESS_KEY,
                   DFSConfigKeys.DFS_WEBHDFS_UGI_EXPIRE_AFTER_ACCESS_DEFAULT),
               TimeUnit.MILLISECONDS).build();
+    }
+  }
+
+  @VisibleForTesting
+  void clearCache() throws IOException {
+    if (UserGroupInformation.isSecurityEnabled()) {
+      params.delegationToken().decodeIdentifier().clearCache();
     }
   }
 

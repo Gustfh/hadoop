@@ -32,16 +32,19 @@ import java.util.Map;
 
 import javax.servlet.http.HttpServlet;
 
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.conf.Configuration.IntegerRanges;
 import org.apache.hadoop.http.HttpConfig.Policy;
 import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.security.http.RestCsrfPreventionFilter;
+import org.apache.hadoop.security.http.XFrameOptionsFilter;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
+import org.eclipse.jetty.webapp.WebAppContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -79,6 +82,8 @@ public class WebApps {
       public Class<? extends HttpServlet> clazz;
       public String name;
       public String spec;
+      public Map<String, String> params;
+      public boolean loadExistingFilters = true;
     }
     
     final String name;
@@ -90,10 +95,13 @@ public class WebApps {
     boolean findPort = false;
     Configuration conf;
     Policy httpPolicy = null;
+    boolean needsClientAuth = false;
+    String portRangeConfigKey = null;
     boolean devMode = false;
     private String spnegoPrincipalKey;
     private String spnegoKeytabKey;
-    private String configPrefix;
+    private String csrfConfigPrefix;
+    private String xfsConfigPrefix;
     private final HashSet<ServletStruct> servlets = new HashSet<ServletStruct>();
     private final HashMap<String, Object> attributes = new HashMap<String, Object>();
 
@@ -142,7 +150,20 @@ public class WebApps {
       servlets.add(struct);
       return this;
     }
-    
+
+    public Builder<T> withServlet(String name, String pathSpec,
+        Class<? extends HttpServlet> servlet,
+        Map<String, String> params,boolean loadExistingFilters) {
+      ServletStruct struct = new ServletStruct();
+      struct.clazz = servlet;
+      struct.name = name;
+      struct.spec = pathSpec;
+      struct.params = params;
+      struct.loadExistingFilters = loadExistingFilters;
+      servlets.add(struct);
+      return this;
+    }
+
     public Builder<T> with(Configuration conf) {
       this.conf = conf;
       return this;
@@ -151,6 +172,24 @@ public class WebApps {
     public Builder<T> withHttpPolicy(Configuration conf, Policy httpPolicy) {
       this.conf = conf;
       this.httpPolicy = httpPolicy;
+      return this;
+    }
+
+    public Builder<T> needsClientAuth(boolean needsClientAuth) {
+      this.needsClientAuth = needsClientAuth;
+      return this;
+    }
+
+    /**
+     * Set port range config key and associated configuration object.
+     * @param config configuration.
+     * @param portRangeConfKey port range config key.
+     * @return builder object.
+     */
+    public Builder<T> withPortRange(Configuration config,
+        String portRangeConfKey) {
+      this.conf = config;
+      this.portRangeConfigKey = portRangeConfKey;
       return this;
     }
 
@@ -166,13 +205,25 @@ public class WebApps {
 
     /**
      * Enable the CSRF filter.
-     * @param csrfConfigPrefix The config prefix that identifies the
+     * @param prefix The config prefix that identifies the
      *                         CSRF parameters applicable for this filter
      *                         instance.
      * @return the Builder instance
      */
-    public Builder<T> withCSRFProtection(String csrfConfigPrefix) {
-      this.configPrefix = csrfConfigPrefix;
+    public Builder<T> withCSRFProtection(String prefix) {
+      this.csrfConfigPrefix = prefix;
+      return this;
+    }
+
+    /**
+     * Enable the XFS filter.
+     * @param prefix The config prefix that identifies the
+     *                         XFS parameters applicable for this filter
+     *                         instance.
+     * @return the Builder instance
+     */
+    public Builder<T> withXFSProtection(String prefix) {
+      this.xfsConfigPrefix = prefix;
       return this;
     }
 
@@ -213,6 +264,17 @@ public class WebApps {
           pathList.add("/" + wsName + "/*");
         }
       }
+
+      for (ServletStruct s : servlets) {
+        if (!pathList.contains(s.spec)) {
+          // The servlet told us to not load-existing filters, but we still want
+          // to add the default authentication filter always, so add it to the
+          // pathList
+          if (!s.loadExistingFilters) {
+            pathList.add(s.spec);
+          }
+        }
+      }
       if (conf == null) {
         conf = new Configuration();
       }
@@ -250,15 +312,24 @@ public class WebApps {
                   : WebAppUtils.HTTP_PREFIX;
         }
         HttpServer2.Builder builder = new HttpServer2.Builder()
-            .setName(name)
-            .addEndpoint(
-                URI.create(httpScheme + bindAddress
-                    + ":" + port)).setConf(conf).setFindPort(findPort)
+            .setName(name).setConf(conf).setFindPort(findPort)
             .setACL(new AccessControlList(conf.get(
-              YarnConfiguration.YARN_ADMIN_ACL, 
-              YarnConfiguration.DEFAULT_YARN_ADMIN_ACL)))
+                YarnConfiguration.YARN_ADMIN_ACL,
+                YarnConfiguration.DEFAULT_YARN_ADMIN_ACL)))
             .setPathSpec(pathList.toArray(new String[0]));
-
+        // Get port ranges from config.
+        IntegerRanges ranges = null;
+        if (portRangeConfigKey != null) {
+          ranges = conf.getRange(portRangeConfigKey, "");
+        }
+        int startPort = port;
+        if (ranges != null && !ranges.isEmpty()) {
+          // Set port ranges if its configured.
+          startPort = ranges.getRangeStart();
+          builder.setPortRanges(ranges);
+        }
+        builder.addEndpoint(URI.create(httpScheme + bindAddress +
+            ":" + startPort));
         boolean hasSpnegoConf = spnegoPrincipalKey != null
             && conf.get(spnegoPrincipalKey) != null && spnegoKeytabKey != null
             && conf.get(spnegoKeytabKey) != null;
@@ -270,18 +341,40 @@ public class WebApps {
         }
 
         if (httpScheme.equals(WebAppUtils.HTTPS_PREFIX)) {
-          WebAppUtils.loadSslConfiguration(builder, conf);
+          String amKeystoreLoc = System.getenv("KEYSTORE_FILE_LOCATION");
+          if (amKeystoreLoc != null) {
+            LOG.info("Setting keystore location to " + amKeystoreLoc);
+            String password = System.getenv("KEYSTORE_PASSWORD");
+            builder.keyStore(amKeystoreLoc, password, "jks");
+          } else {
+            LOG.info("Loading standard ssl config");
+            WebAppUtils.loadSslConfiguration(builder, conf);
+          }
+          builder.needsClientAuth(needsClientAuth);
+          if (needsClientAuth) {
+            String amTruststoreLoc = System.getenv("TRUSTSTORE_FILE_LOCATION");
+            if (amTruststoreLoc != null) {
+              LOG.info("Setting truststore location to " + amTruststoreLoc);
+              String password = System.getenv("TRUSTSTORE_PASSWORD");
+              builder.trustStore(amTruststoreLoc, password, "jks");
+            }
+          }
         }
 
         HttpServer2 server = builder.build();
 
         for(ServletStruct struct: servlets) {
-          server.addServlet(struct.name, struct.spec, struct.clazz);
+          if (!struct.loadExistingFilters) {
+            server.addInternalServlet(struct.name, struct.spec,
+                struct.clazz, struct.params);
+          } else {
+            server.addServlet(struct.name, struct.spec, struct.clazz);
+          }
         }
         for(Map.Entry<String, Object> entry : attributes.entrySet()) {
           server.setAttribute(entry.getKey(), entry.getValue());
         }
-        Map<String, String> params = getCsrfConfigParameters();
+        Map<String, String> params = getConfigParameters(csrfConfigPrefix);
 
         if (hasCSRFEnabled(params)) {
           LOG.info("CSRF Protection has been enabled for the {} application. "
@@ -292,6 +385,15 @@ public class WebApps {
           HttpServer2.defineFilter(server.getWebAppContext(), restCsrfClassName,
                                    restCsrfClassName, params,
                                    new String[] {"/*"});
+        }
+
+        params = getConfigParameters(xfsConfigPrefix);
+
+        if (hasXFSEnabled()) {
+          String xfsClassName = XFrameOptionsFilter.class.getName();
+          HttpServer2.defineFilter(server.getWebAppContext(), xfsClassName,
+              xfsClassName, params,
+              new String[] {"/*"});
         }
 
         HttpServer2.defineFilter(server.getWebAppContext(), "guice",
@@ -327,14 +429,18 @@ public class WebApps {
       return params != null && Boolean.valueOf(params.get("enabled"));
     }
 
-    private Map<String, String> getCsrfConfigParameters() {
-      Map<String, String> params = null;
-      if (configPrefix != null) {
-        // need to obtain parameters for CSRF filter
-        params =
-            RestCsrfPreventionFilter.getFilterParams(conf, configPrefix);
-      }
-      return params;
+    /**
+     * XFS filter is enabled by default.  If the enabled flag is not explicitly
+     * specified and set to "false", this method returns true.
+     * @return true if XFS is enabled, false otherwise.
+     */
+    private boolean hasXFSEnabled() {
+      return conf.getBoolean(YarnConfiguration.YARN_XFS_ENABLED, true);
+    }
+
+    private Map<String, String> getConfigParameters(String configPrefix) {
+      return configPrefix != null ? conf.getPropsWithPrefix(configPrefix) :
+          null;
     }
 
     public WebApp start() {
@@ -342,8 +448,16 @@ public class WebApps {
     }
 
     public WebApp start(WebApp webapp) {
+      return start(webapp, null);
+    }
+
+    public WebApp start(WebApp webapp, WebAppContext ui2Context) {
       WebApp webApp = build(webapp);
       HttpServer2 httpServer = webApp.httpServer();
+      if (ui2Context != null) {
+        addFiltersForNewContext(ui2Context);
+        httpServer.addHandlerAtFront(ui2Context);
+      }
       try {
         httpServer.start();
         LOG.info("Web app " + name + " started at "
@@ -352,6 +466,27 @@ public class WebApps {
         throw new WebAppException("Error starting http server", e);
       }
       return webApp;
+    }
+
+    private void addFiltersForNewContext(WebAppContext ui2Context) {
+      Map<String, String> params = getConfigParameters(csrfConfigPrefix);
+
+      if (hasCSRFEnabled(params)) {
+        LOG.info("CSRF Protection has been enabled for the {} application. "
+            + "Please ensure that there is an authentication mechanism "
+            + "enabled (kerberos, custom, etc).", name);
+        String restCsrfClassName = RestCsrfPreventionFilter.class.getName();
+        HttpServer2.defineFilter(ui2Context, restCsrfClassName,
+            restCsrfClassName, params, new String[]{"/*"});
+      }
+
+      params = getConfigParameters(xfsConfigPrefix);
+
+      if (hasXFSEnabled()) {
+        String xfsClassName = XFrameOptionsFilter.class.getName();
+        HttpServer2.defineFilter(ui2Context, xfsClassName, xfsClassName, params,
+            new String[]{"/*"});
+      }
     }
 
     private String inferHostClass() {

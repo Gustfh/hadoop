@@ -30,6 +30,7 @@ import org.apache.hadoop.hdfs.server.namenode.snapshot.DirectoryWithSnapshotFeat
 import org.apache.hadoop.hdfs.server.namenode.snapshot.Snapshot;
 
 import com.google.common.base.Preconditions;
+import org.apache.hadoop.security.AccessControlException;
 
 /**
  * An anonymous reference to an inode.
@@ -125,10 +126,6 @@ public abstract class INodeReference extends INode {
     return referred;
   }
 
-  public final void setReferredINode(INode referred) {
-    this.referred = referred;
-  }
-  
   @Override
   public final boolean isReference() {
     return true;
@@ -314,7 +311,7 @@ public abstract class INodeReference extends INode {
 
   @Override
   public ContentSummaryComputationContext computeContentSummary(int snapshotId,
-      ContentSummaryComputationContext summary) {
+      ContentSummaryComputationContext summary) throws AccessControlException {
     return referred.computeContentSummary(snapshotId, summary);
   }
 
@@ -672,10 +669,10 @@ public abstract class INodeReference extends INode {
     
     /**
      * {@inheritDoc}
-     * <br/>
+     * <br>
      * To destroy a DstReference node, we first remove its link with the 
-     * referred node. If the reference number of the referred node is <= 0, we 
-     * destroy the subtree of the referred node. Otherwise, we clean the 
+     * referred node. If the reference number of the referred node is &lt;= 0,
+     * we destroy the subtree of the referred node. Otherwise, we clean the
      * referred node's subtree and delete everything created after the last 
      * rename operation, i.e., everything outside of the scope of the prior 
      * WithName nodes.

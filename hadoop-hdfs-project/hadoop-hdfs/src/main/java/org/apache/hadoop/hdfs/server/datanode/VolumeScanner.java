@@ -21,9 +21,9 @@ package org.apache.hadoop.hdfs.server.datanode;
 import java.io.DataOutputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -37,6 +37,7 @@ import org.apache.hadoop.hdfs.server.datanode.BlockScanner.Conf;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeReference;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi.BlockIterator;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
+import org.apache.hadoop.hdfs.server.datanode.metrics.DataNodeMetrics;
 import org.apache.hadoop.hdfs.util.DataTransferThrottler;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.util.Time;
@@ -44,8 +45,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * VolumeScanner scans a single volume.  Each VolumeScanner has its own thread.<p/>
- * They are all managed by the DataNode's BlockScanner.
+ * VolumeScanner scans a single volume.  Each VolumeScanner has its own thread.
+ * <p>They are all managed by the DataNode's BlockScanner.
  */
 public class VolumeScanner extends Thread {
   public static final Logger LOG =
@@ -69,12 +70,19 @@ public class VolumeScanner extends Thread {
   /**
    * The configuration.
    */
-  private final Conf conf;
+  private Conf conf;
+
+  @VisibleForTesting
+  void setConf(Conf conf) {
+    this.conf = conf;
+  }
 
   /**
    * The DataNode this VolumEscanner is associated with.
    */
   private final DataNode datanode;
+
+  private final DataNodeMetrics metrics;
 
   /**
    * A reference to the volume that we're scanning.
@@ -117,7 +125,7 @@ public class VolumeScanner extends Thread {
    * Each block pool has its own BlockIterator.
    */
   private final List<BlockIterator> blockIters =
-      new LinkedList<BlockIterator>();
+      new ArrayList<BlockIterator>();
 
   /**
    * Blocks which are suspect.
@@ -217,18 +225,18 @@ public class VolumeScanner extends Thread {
 
   public void printStats(StringBuilder p) {
     p.append(String.format("Block scanner information for volume %s with base" +
-        " path %s%n", volume.getStorageID(), volume.getBasePath()));
+        " path %s%n", volume.getStorageID(), volume));
     synchronized (stats) {
       p.append(String.format("Bytes verified in last hour       : %57d%n",
-          stats.bytesScannedInPastHour));
-      p.append(String.format("Blocks scanned in current period  : %57d%n",
-          stats.blocksScannedInCurrentPeriod));
-      p.append(String.format("Blocks scanned since restart      : %57d%n",
-          stats.blocksScannedSinceRestart));
-      p.append(String.format("Block pool scans since restart    : %57d%n",
-          stats.scansSinceRestart));
-      p.append(String.format("Block scan errors since restart   : %57d%n",
-          stats.scanErrorsSinceRestart));
+          stats.bytesScannedInPastHour))
+          .append(String.format("Blocks scanned in current period  : %57d%n",
+              stats.blocksScannedInCurrentPeriod))
+          .append(String.format("Blocks scanned since restart      : %57d%n",
+              stats.blocksScannedSinceRestart))
+          .append(String.format("Block pool scans since restart    : %57d%n",
+              stats.scansSinceRestart))
+          .append(String.format("Block scan errors since restart   : %57d%n",
+              stats.scanErrorsSinceRestart));
       if (stats.nextBlockPoolScanStartMs > 0) {
         p.append(String.format("Hours until next block pool scan  : %57.3f%n",
             positiveMsToHours(stats.nextBlockPoolScanStartMs -
@@ -253,20 +261,20 @@ public class VolumeScanner extends Thread {
 
     public void setup(VolumeScanner scanner) {
       LOG.trace("Starting VolumeScanner {}",
-          scanner.volume.getBasePath());
+          scanner.volume);
       this.scanner = scanner;
     }
 
     public void handle(ExtendedBlock block, IOException e) {
       FsVolumeSpi volume = scanner.volume;
       if (e == null) {
-        LOG.trace("Successfully scanned {} on {}", block, volume.getBasePath());
+        LOG.trace("Successfully scanned {} on {}", block, volume);
         return;
       }
       // If the block does not exist anymore, then it's not an error.
       if (!volume.getDataset().contains(block)) {
         LOG.debug("Volume {}: block {} is no longer in the dataset.",
-            volume.getBasePath(), block);
+            volume, block);
         return;
       }
       // If the block exists, the exception may due to a race with write:
@@ -278,15 +286,15 @@ public class VolumeScanner extends Thread {
       if (e instanceof FileNotFoundException ) {
         LOG.info("Volume {}: verification failed for {} because of " +
                 "FileNotFoundException.  This may be due to a race with write.",
-            volume.getBasePath(), block);
+            volume, block);
         return;
       }
-      LOG.warn("Reporting bad {} on {}", block, volume.getBasePath());
+      LOG.warn("Reporting bad {} on {}", block, volume);
       try {
-        scanner.datanode.reportBadBlocks(block);
+        scanner.datanode.reportBadBlocks(block, volume);
       } catch (IOException ie) {
         // This is bad, but not bad enough to shut down the scanner.
-        LOG.warn("Cannot report bad " + block.getBlockId(), e);
+        LOG.warn("Cannot report bad block " + block, ie);
       }
     }
   }
@@ -294,6 +302,7 @@ public class VolumeScanner extends Thread {
   VolumeScanner(Conf conf, DataNode datanode, FsVolumeReference ref) {
     this.conf = conf;
     this.datanode = datanode;
+    this.metrics = datanode.getMetrics();
     this.ref = ref;
     this.volume = ref.getVolume();
     ScanResultHandler handler;
@@ -304,7 +313,7 @@ public class VolumeScanner extends Thread {
       handler = new ScanResultHandler();
     }
     this.resultHandler = handler;
-    setName("VolumeScannerThread(" + volume.getBasePath() + ")");
+    setName("VolumeScannerThread(" + volume + ")");
     setDaemon(true);
   }
 
@@ -375,7 +384,7 @@ public class VolumeScanner extends Thread {
       BlockIterator iter = blockIters.get(idx);
       if (!iter.atEnd()) {
         LOG.info("Now scanning bpid {} on volume {}",
-            iter.getBlockPoolId(), volume.getBasePath());
+            iter.getBlockPoolId(), volume);
         curBlockIter = iter;
         return 0L;
       }
@@ -384,7 +393,7 @@ public class VolumeScanner extends Thread {
       if (waitMs <= 0) {
         iter.rewind();
         LOG.info("Now rescanning bpid {} on volume {}, after more than " +
-            "{} hour(s)", iter.getBlockPoolId(), volume.getBasePath(),
+            "{} hour(s)", iter.getBlockPoolId(), volume,
             TimeUnit.HOURS.convert(conf.scanPeriodMs, TimeUnit.MILLISECONDS));
         curBlockIter = iter;
         return 0L;
@@ -415,20 +424,21 @@ public class VolumeScanner extends Thread {
           cblock.getBlockPoolId(), cblock.getBlockId());
       if (b == null) {
         LOG.info("Replica {} was not found in the VolumeMap for volume {}",
-            cblock, volume.getBasePath());
+            cblock, volume);
       } else {
         block = new ExtendedBlock(cblock.getBlockPoolId(), b);
       }
     } catch (FileNotFoundException e) {
       LOG.info("FileNotFoundException while finding block {} on volume {}",
-          cblock, volume.getBasePath());
+          cblock, volume);
     } catch (IOException e) {
       LOG.warn("I/O error while finding block {} on volume {}",
-            cblock, volume.getBasePath());
+            cblock, volume);
     }
     if (block == null) {
       return -1; // block not found.
     }
+    LOG.debug("start scanning block {}", block);
     BlockSender blockSender = null;
     try {
       blockSender = new BlockSender(block, 0, -1,
@@ -437,12 +447,14 @@ public class VolumeScanner extends Thread {
       throttler.setBandwidth(bytesPerSec);
       long bytesRead = blockSender.sendBlock(nullStream, null, throttler);
       resultHandler.handle(block, null);
+      metrics.incrBlocksVerified();
       return bytesRead;
     } catch (IOException e) {
       resultHandler.handle(block, e);
     } finally {
       IOUtils.cleanup(null, blockSender);
     }
+    metrics.incrBlockVerificationFailures();
     return -1;
   }
 
@@ -610,6 +622,7 @@ public class VolumeScanner extends Thread {
               break;
             }
             if (timeout > 0) {
+              LOG.debug("{}: wait for {} milliseconds", this, timeout);
               wait(timeout);
               if (stopping) {
                 break;
@@ -641,7 +654,7 @@ public class VolumeScanner extends Thread {
 
   @Override
   public String toString() {
-    return "VolumeScanner(" + volume.getBasePath() +
+    return "VolumeScanner(" + volume +
         ", " + volume.getStorageID() + ")";
   }
 

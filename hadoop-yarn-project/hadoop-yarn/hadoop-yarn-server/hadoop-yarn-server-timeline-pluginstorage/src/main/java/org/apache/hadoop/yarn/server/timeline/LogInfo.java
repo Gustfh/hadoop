@@ -16,6 +16,11 @@
  */
 package org.apache.hadoop.yarn.server.timeline;
 
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonParseException;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.MappingIterator;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.annotations.VisibleForTesting;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -31,15 +36,11 @@ import org.apache.hadoop.yarn.api.records.timeline.TimelineEntity;
 import org.apache.hadoop.yarn.api.records.timeline.TimelineEntityGroupId;
 import org.apache.hadoop.yarn.api.records.timeline.TimelinePutResponse;
 import org.apache.hadoop.yarn.exceptions.YarnException;
-import org.codehaus.jackson.JsonFactory;
-import org.codehaus.jackson.JsonParseException;
-import org.codehaus.jackson.JsonParser;
-import org.codehaus.jackson.map.MappingIterator;
-import org.codehaus.jackson.map.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 
 abstract class LogInfo {
@@ -98,13 +99,14 @@ abstract class LogInfo {
     ));
   }
 
-  public void parseForStore(TimelineDataManager tdm, Path appDirPath,
+  public long parseForStore(TimelineDataManager tdm, Path appDirPath,
       boolean appCompleted, JsonFactory jsonFactory, ObjectMapper objMapper,
       FileSystem fs) throws IOException {
     LOG.debug("Parsing for log dir {} on attempt {}", appDirPath,
         attemptDirName);
     Path logPath = getPath(appDirPath);
     FileStatus status = fs.getFileStatus(logPath);
+    long numParsed = 0;
     if (status != null) {
       long startTime = Time.monotonicNow();
       try {
@@ -113,6 +115,7 @@ abstract class LogInfo {
             objMapper, fs);
         LOG.info("Parsed {} entities from {} in {} msec",
             count, logPath, Time.monotonicNow() - startTime);
+        numParsed += count;
       } catch (RuntimeException e) {
         // If AppLogs cannot parse this log, it may be corrupted or just empty
         if (e.getCause() instanceof JsonParseException &&
@@ -125,6 +128,7 @@ abstract class LogInfo {
     } else {
       LOG.warn("{} no longer exists. Skip for scanning. ", logPath);
     }
+    return numParsed;
   }
 
   private long parsePath(TimelineDataManager tdm, Path logPath,
@@ -137,7 +141,7 @@ abstract class LogInfo {
     try {
       in.seek(offset);
       try {
-        parser = jsonFactory.createJsonParser(in);
+        parser = jsonFactory.createParser((InputStream)in);
         parser.configure(JsonParser.Feature.AUTO_CLOSE_SOURCE, false);
       } catch (IOException e) {
         // if app hasn't completed then there may be errors due to the

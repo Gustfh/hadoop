@@ -26,12 +26,12 @@ import org.apache.hadoop.yarn.util.resource.Resources;
 
 public class CapacityHeadroomProvider {
   
-  LeafQueue.User user;
+  UsersManager.User user;
   LeafQueue queue;
   FiCaSchedulerApp application;
   LeafQueue.QueueResourceLimitsInfo queueResourceLimitsInfo;
   
-  public CapacityHeadroomProvider(LeafQueue.User user, LeafQueue queue,
+  public CapacityHeadroomProvider(UsersManager.User user, LeafQueue queue,
       FiCaSchedulerApp application,
       LeafQueue.QueueResourceLimitsInfo queueResourceLimitsInfo) {
 
@@ -65,8 +65,8 @@ public class CapacityHeadroomProvider {
       }
     }
     // Corner case to deal with applications being slightly over-limit
-    if (headroom.getMemory() < 0) {
-      headroom.setMemory(0);
+    if (headroom.getMemorySize() < 0) {
+      headroom.setMemorySize(0);
     }
     return headroom;
   }

@@ -17,24 +17,36 @@
 */
 package org.apache.hadoop.yarn.util.resource;
 
+import com.google.common.collect.ImmutableSet;
+import org.apache.hadoop.yarn.api.records.ResourceInformation;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.yarn.api.records.Resource;
 
+import java.util.Set;
+
 @Private
 @Unstable
 public class DefaultResourceCalculator extends ResourceCalculator {
-  
+  private static final Logger LOG =
+      LoggerFactory.getLogger(DefaultResourceCalculator.class);
+
+  private static final Set<String> INSUFFICIENT_RESOURCE_NAME =
+      ImmutableSet.of(ResourceInformation.MEMORY_URI);
+
   @Override
-  public int compare(Resource unused, Resource lhs, Resource rhs) {
+  public int compare(Resource unused, Resource lhs, Resource rhs,
+      boolean singleType) {
     // Only consider memory
-    return lhs.getMemory() - rhs.getMemory();
+    return Long.compare(lhs.getMemorySize(), rhs.getMemorySize());
   }
 
   @Override
-  public int computeAvailableContainers(Resource available, Resource required) {
+  public long computeAvailableContainers(Resource available, Resource required) {
     // Only consider memory
-    return available.getMemory() / required.getMemory();
+    return available.getMemorySize() / required.getMemorySize();
   }
 
   @Override
@@ -44,7 +56,7 @@ public class DefaultResourceCalculator extends ResourceCalculator {
   }
   
   public boolean isInvalidDivisor(Resource r) {
-    if (r.getMemory() == 0.0f) {
+    if (r.getMemorySize() == 0.0f) {
       return true;
     }
     return false;
@@ -52,51 +64,66 @@ public class DefaultResourceCalculator extends ResourceCalculator {
 
   @Override
   public float ratio(Resource a, Resource b) {
-    return (float)a.getMemory() / b.getMemory();
+    return divideSafelyAsFloat(a.getMemorySize(), b.getMemorySize());
   }
 
   @Override
   public Resource divideAndCeil(Resource numerator, int denominator) {
     return Resources.createResource(
-        divideAndCeil(numerator.getMemory(), denominator));
+        divideAndCeil(numerator.getMemorySize(), denominator));
+  }
+
+  @Override
+  public Resource divideAndCeil(Resource numerator, float denominator) {
+    return Resources.createResource(
+        divideAndCeil(numerator.getMemorySize(), denominator));
   }
 
   @Override
   public Resource normalize(Resource r, Resource minimumResource,
       Resource maximumResource, Resource stepFactor) {
-    int normalizedMemory = Math.min(
-        roundUp(
-            Math.max(r.getMemory(), minimumResource.getMemory()),
-            stepFactor.getMemory()),
-            maximumResource.getMemory());
-    return Resources.createResource(normalizedMemory);
-  }
+    if (stepFactor.getMemorySize() == 0) {
+      LOG.error("Memory cannot be allocated in increments of zero. Assuming " +
+          minimumResource.getMemorySize() + "MB increment size. "
+          + "Please ensure the scheduler configuration is correct.");
+      stepFactor = minimumResource;
+    }
 
-  @Override
-  public Resource normalize(Resource r, Resource minimumResource,
-                            Resource maximumResource) {
-    return normalize(r, minimumResource, maximumResource, minimumResource);
+    long normalizedMemory = Math.min(
+        roundUp(
+            Math.max(r.getMemorySize(), minimumResource.getMemorySize()),
+            stepFactor.getMemorySize()),
+            maximumResource.getMemorySize());
+    return Resources.createResource(normalizedMemory);
   }
 
   @Override
   public Resource roundUp(Resource r, Resource stepFactor) {
     return Resources.createResource(
-        roundUp(r.getMemory(), stepFactor.getMemory())
+        roundUp(r.getMemorySize(), stepFactor.getMemorySize())
         );
   }
 
   @Override
   public Resource roundDown(Resource r, Resource stepFactor) {
     return Resources.createResource(
-        roundDown(r.getMemory(), stepFactor.getMemory()));
+        roundDown(r.getMemorySize(), stepFactor.getMemorySize()));
   }
 
   @Override
   public Resource multiplyAndNormalizeUp(Resource r, double by,
       Resource stepFactor) {
     return Resources.createResource(
-        roundUp((int)(r.getMemory() * by + 0.5), stepFactor.getMemory())
-        );
+        roundUp((long) (r.getMemorySize() * by + 0.5),
+            stepFactor.getMemorySize()));
+  }
+
+  @Override
+  public Resource multiplyAndNormalizeUp(Resource r, double[] by,
+      Resource stepFactor) {
+    return Resources.createResource(
+        roundUp((long) (r.getMemorySize() * by[0] + 0.5),
+            stepFactor.getMemorySize()));
   }
 
   @Override
@@ -104,15 +131,39 @@ public class DefaultResourceCalculator extends ResourceCalculator {
       Resource stepFactor) {
     return Resources.createResource(
         roundDown(
-            (int)(r.getMemory() * by), 
-            stepFactor.getMemory()
+            (long)(r.getMemorySize() * by),
+            stepFactor.getMemorySize()
             )
         );
   }
 
   @Override
-  public boolean fitsIn(Resource cluster,
-      Resource smaller, Resource bigger) {
-    return smaller.getMemory() <= bigger.getMemory();
+  public boolean fitsIn(Resource smaller, Resource bigger) {
+    return smaller.getMemorySize() <= bigger.getMemorySize();
+  }
+
+  @Override
+  public Resource normalizeDown(Resource r, Resource stepFactor) {
+    return Resources.createResource(
+        roundDown((r.getMemorySize()), stepFactor.getMemorySize()));
+  }
+
+  @Override
+  public boolean isAnyMajorResourceZeroOrNegative(Resource resource) {
+    return resource.getMemorySize() <= 0;
+  }
+
+  @Override
+  public boolean isAnyMajorResourceAboveZero(Resource resource) {
+    return resource.getMemorySize() > 0;
+  }
+
+  public Set<String> getInsufficientResourceNames(Resource required,
+      Resource available) {
+    if (required.getMemorySize() > available.getMemorySize()) {
+      return INSUFFICIENT_RESOURCE_NAME;
+    } else {
+      return ImmutableSet.of();
+    }
   }
 }

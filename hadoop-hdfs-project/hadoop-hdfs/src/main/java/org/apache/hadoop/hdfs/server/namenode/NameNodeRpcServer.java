@@ -26,24 +26,31 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_LIFELINE_HANDLER
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_LIFELINE_HANDLER_RATIO_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SERVICE_HANDLER_COUNT_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SERVICE_HANDLER_COUNT_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_RPC_ADDRESS_AUXILIARY_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SEND_QOP_ENABLED;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SEND_QOP_ENABLED_DEFAULT;
 import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.MAX_PATH_DEPTH;
 import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.MAX_PATH_LENGTH;
 import static org.apache.hadoop.util.Time.now;
 
+import com.google.common.base.Charsets;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.security.PrivilegedExceptionAction;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
 
 import com.google.common.collect.Lists;
 
 import org.apache.hadoop.HadoopIllegalArgumentException;
+import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.ReconfigurationTaskStatus;
 import org.apache.hadoop.crypto.CryptoProtocolVersion;
@@ -77,10 +84,12 @@ import org.apache.hadoop.ha.protocolPB.HAServiceProtocolPB;
 import org.apache.hadoop.ha.protocolPB.HAServiceProtocolServerSideTranslatorPB;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtil;
+import org.apache.hadoop.hdfs.DFSUtilClient;
 import org.apache.hadoop.hdfs.HDFSPolicyProvider;
 import org.apache.hadoop.hdfs.inotify.EventBatch;
 import org.apache.hadoop.hdfs.inotify.EventBatchList;
 import org.apache.hadoop.hdfs.protocol.AclException;
+import org.apache.hadoop.hdfs.protocol.AddErasureCodingPolicyResponse;
 import org.apache.hadoop.hdfs.protocol.AlreadyBeingCreatedException;
 import org.apache.hadoop.hdfs.protocol.BlockListAsLongs;
 import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
@@ -93,23 +102,34 @@ import org.apache.hadoop.hdfs.protocol.DSQuotaExceededException;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.DirectoryListing;
+import org.apache.hadoop.hdfs.protocol.ECBlockGroupStats;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 import org.apache.hadoop.hdfs.protocol.EncryptionZone;
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicyInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.FSLimitException;
+import org.apache.hadoop.hdfs.protocol.HdfsLocatedFileStatus;
 import org.apache.hadoop.hdfs.protocol.LastBlockWithStatus;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants.ReencryptAction;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.RollingUpgradeAction;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants.StoragePolicySatisfierMode;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.protocol.NSQuotaExceededException;
+import org.apache.hadoop.hdfs.protocol.OpenFileEntry;
+import org.apache.hadoop.hdfs.protocol.OpenFilesIterator;
+import org.apache.hadoop.hdfs.protocol.OpenFilesIterator.OpenFilesType;
 import org.apache.hadoop.hdfs.protocol.QuotaByStorageTypeExceededException;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.hdfs.protocol.RecoveryInProgressException;
+import org.apache.hadoop.hdfs.protocol.ReplicatedBlockStats;
+import org.apache.hadoop.hdfs.protocol.ZoneReencryptionStatus;
 import org.apache.hadoop.hdfs.protocol.RollingUpgradeInfo;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport;
+import org.apache.hadoop.hdfs.protocol.SnapshotDiffReportListing;
 import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
 import org.apache.hadoop.hdfs.protocol.UnregisteredNodeException;
 import org.apache.hadoop.hdfs.protocol.UnresolvedPathException;
@@ -128,6 +148,8 @@ import org.apache.hadoop.hdfs.protocolPB.NamenodeProtocolPB;
 import org.apache.hadoop.hdfs.protocolPB.NamenodeProtocolServerSideTranslatorPB;
 import org.apache.hadoop.hdfs.protocolPB.ReconfigurationProtocolPB;
 import org.apache.hadoop.hdfs.protocolPB.ReconfigurationProtocolServerSideTranslatorPB;
+import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
+import org.apache.hadoop.hdfs.security.token.block.BlockTokenSecretManager;
 import org.apache.hadoop.hdfs.security.token.block.DataEncryptionKey;
 import org.apache.hadoop.hdfs.security.token.block.ExportedBlockKeys;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
@@ -135,10 +157,11 @@ import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerFaultInjector;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NamenodeRole;
+import org.apache.hadoop.hdfs.server.common.HttpGetFailedException;
 import org.apache.hadoop.hdfs.server.common.IncorrectVersionException;
 import org.apache.hadoop.hdfs.server.namenode.NameNode.OperationCategory;
 import org.apache.hadoop.hdfs.server.namenode.metrics.NameNodeMetrics;
-import org.apache.hadoop.hdfs.server.namenode.web.resources.NamenodeWebHdfsMethods;
+import org.apache.hadoop.hdfs.server.namenode.sps.StoragePolicySatisfyManager;
 import org.apache.hadoop.hdfs.server.protocol.BlockReportContext;
 import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeCommand;
@@ -153,6 +176,8 @@ import org.apache.hadoop.hdfs.server.protocol.NamenodeRegistration;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.NodeRegistration;
 import org.apache.hadoop.hdfs.server.protocol.RemoteEditLogManifest;
+import org.apache.hadoop.hdfs.server.protocol.SlowDiskReports;
+import org.apache.hadoop.hdfs.server.protocol.SlowPeerReports;
 import org.apache.hadoop.hdfs.server.protocol.StorageBlockReport;
 import org.apache.hadoop.hdfs.server.protocol.StorageReceivedDeletedBlocks;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
@@ -167,12 +192,12 @@ import org.apache.hadoop.ipc.RetryCache.CacheEntry;
 import org.apache.hadoop.ipc.RetryCache.CacheEntryWithPayload;
 import org.apache.hadoop.ipc.Server;
 import org.apache.hadoop.ipc.StandbyException;
-import org.apache.hadoop.ipc.WritableRpcEngine;
 import org.apache.hadoop.ipc.RefreshRegistry;
 import org.apache.hadoop.ipc.RefreshResponse;
 import org.apache.hadoop.net.Node;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.Groups;
+import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authorize.AuthorizationException;
 import org.apache.hadoop.security.authorize.ProxyUsers;
@@ -204,11 +229,15 @@ import org.slf4j.Logger;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.protobuf.BlockingService;
 
+import javax.annotation.Nonnull;
+
 /**
  * This class is responsible for handling all of the RPC calls to the NameNode.
  * It is created, started, and stopped by {@link NameNode}.
  */
-class NameNodeRpcServer implements NamenodeProtocols {
+@InterfaceAudience.Private
+@VisibleForTesting
+public class NameNodeRpcServer implements NamenodeProtocols {
   
   private static final Logger LOG = NameNode.LOG;
   private static final Logger stateChangeLog = NameNode.stateChangeLog;
@@ -238,13 +267,17 @@ class NameNodeRpcServer implements NamenodeProtocols {
   
   private final String minimumDataNodeVersion;
 
+  private final String defaultECPolicyName;
+
+  private final boolean shouldSendQOP;
+
   public NameNodeRpcServer(Configuration conf, NameNode nn)
       throws IOException {
     this.nn = nn;
     this.namesystem = nn.getNamesystem();
     this.retryCache = namesystem.getRetryCache();
     this.metrics = NameNode.getNameNodeMetrics();
-    
+
     int handlerCount = 
       conf.getInt(DFS_NAMENODE_HANDLER_COUNT_KEY, 
                   DFS_NAMENODE_HANDLER_COUNT_DEFAULT);
@@ -314,8 +347,6 @@ class NameNodeRpcServer implements NamenodeProtocols {
         new TraceAdminProtocolServerSideTranslatorPB(this);
     BlockingService traceAdminService = TraceAdminService
         .newReflectiveBlockingService(traceAdminXlator);
-    
-    WritableRpcEngine.ensureInitialized();
 
     InetSocketAddress serviceRpcAddr = nn.getServiceRpcServerAddress(conf);
     if (serviceRpcAddr != null) {
@@ -432,6 +463,7 @@ class NameNodeRpcServer implements NamenodeProtocols {
         .setNumHandlers(handlerCount)
         .setVerbose(false)
         .setSecretManager(namesystem.getDelegationTokenSecretManager())
+        .setAlignmentContext(new GlobalStateIdContext(namesystem))
         .build();
 
     // Add all the RPC protocols that the namenode implements
@@ -479,6 +511,10 @@ class NameNodeRpcServer implements NamenodeProtocols {
         DFSConfigKeys.DFS_NAMENODE_MIN_SUPPORTED_DATANODE_VERSION_KEY,
         DFSConfigKeys.DFS_NAMENODE_MIN_SUPPORTED_DATANODE_VERSION_DEFAULT);
 
+    defaultECPolicyName = conf.getTrimmed(
+        DFSConfigKeys.DFS_NAMENODE_EC_SYSTEM_DEFAULT_POLICY,
+        DFSConfigKeys.DFS_NAMENODE_EC_SYSTEM_DEFAULT_POLICY_DEFAULT);
+
     // Set terse exception whose stack trace won't be logged
     clientRpcServer.addTerseExceptions(SafeModeException.class,
         FileNotFoundException.class,
@@ -498,10 +534,10 @@ class NameNodeRpcServer implements NamenodeProtocols {
         QuotaByStorageTypeExceededException.class,
         AclException.class,
         FSLimitException.PathComponentTooLongException.class,
-        FSLimitException.MaxDirectoryItemsExceededException.class,
-        UnresolvedPathException.class);
+        FSLimitException.MaxDirectoryItemsExceededException.class);
 
-    clientRpcServer.addSuppressedLoggingExceptions(StandbyException.class);
+    clientRpcServer.addSuppressedLoggingExceptions(StandbyException.class,
+        UnresolvedPathException.class);
 
     clientRpcServer.setTracer(nn.tracer);
     if (serviceRpcServer != null) {
@@ -510,6 +546,15 @@ class NameNodeRpcServer implements NamenodeProtocols {
     if (lifelineRpcServer != null) {
       lifelineRpcServer.setTracer(nn.tracer);
     }
+    int[] auxiliaryPorts =
+        conf.getInts(DFS_NAMENODE_RPC_ADDRESS_AUXILIARY_KEY);
+    if (auxiliaryPorts != null && auxiliaryPorts.length != 0) {
+      for (int auxiliaryPort : auxiliaryPorts) {
+        this.clientRpcServer.addAuxiliaryListener(auxiliaryPort);
+      }
+    }
+    this.shouldSendQOP = conf.getBoolean(
+        DFS_NAMENODE_SEND_QOP_ENABLED, DFS_NAMENODE_SEND_QOP_ENABLED_DEFAULT);
   }
 
   /** Allow access to the lifeline RPC server for testing */
@@ -520,7 +565,7 @@ class NameNodeRpcServer implements NamenodeProtocols {
 
   /** Allow access to the client RPC server for testing */
   @VisibleForTesting
-  RPC.Server getClientRpcServer() {
+  public RPC.Server getClientRpcServer() {
     return clientRpcServer;
   }
   
@@ -579,8 +624,14 @@ class NameNodeRpcServer implements NamenodeProtocols {
     return serviceRPCAddress;
   }
 
-  InetSocketAddress getRpcAddress() {
+  @VisibleForTesting
+  public InetSocketAddress getRpcAddress() {
     return clientRpcAddress;
+  }
+
+  @VisibleForTesting
+  public Set<InetSocketAddress> getAuxiliaryRpcAddresses() {
+    return clientRpcServer.getAuxiliaryListenerAddresses();
   }
 
   private static UserGroupInformation getRemoteUser() throws IOException {
@@ -592,15 +643,20 @@ class NameNodeRpcServer implements NamenodeProtocols {
   // NamenodeProtocol
   /////////////////////////////////////////////////////
   @Override // NamenodeProtocol
-  public BlocksWithLocations getBlocks(DatanodeInfo datanode, long size)
-  throws IOException {
+  public BlocksWithLocations getBlocks(DatanodeInfo datanode, long size, long
+      minBlockSize)
+      throws IOException {
     if(size <= 0) {
       throw new IllegalArgumentException(
-        "Unexpected not positive size: "+size);
+          "Unexpected not positive size: "+size);
+    }
+    if(minBlockSize < 0) {
+      throw new IllegalArgumentException(
+          "Unexpected not positive size: "+size);
     }
     checkNNStartup();
     namesystem.checkSuperuserPrivilege();
-    return namesystem.getBlocks(datanode, size);
+    return namesystem.getBlocks(datanode, size, minBlockSize);
   }
 
   @Override // NamenodeProtocol
@@ -704,8 +760,14 @@ class NameNodeRpcServer implements NamenodeProtocols {
       throws IOException {
     checkNNStartup();
     metrics.incrGetBlockLocations();
-    return namesystem.getBlockLocations(getClientMachine(), 
-                                        src, offset, length);
+    LocatedBlocks locatedBlocks =
+        namesystem.getBlockLocations(getClientMachine(), src, offset, length);
+    if (shouldSendQOP) {
+      for (LocatedBlock lb : locatedBlocks.getLocatedBlocks()) {
+        wrapEstablishedQOP(lb, getEstablishedClientQOP());
+      }
+    }
+    return locatedBlocks;
   }
   
   @Override // ClientProtocol
@@ -717,8 +779,9 @@ class NameNodeRpcServer implements NamenodeProtocols {
   @Override // ClientProtocol
   public HdfsFileStatus create(String src, FsPermission masked,
       String clientName, EnumSetWritable<CreateFlag> flag,
-      boolean createParent, short replication, long blockSize, 
-      CryptoProtocolVersion[] supportedVersions)
+      boolean createParent, short replication, long blockSize,
+      CryptoProtocolVersion[] supportedVersions, String ecPolicyName,
+      String storagePolicy)
       throws IOException {
     checkNNStartup();
     String clientMachine = getClientMachine();
@@ -742,7 +805,7 @@ class NameNodeRpcServer implements NamenodeProtocols {
           .getShortUserName(), null, masked);
       status = namesystem.startFile(src, perm, clientName, clientMachine,
           flag.get(), createParent, replication, blockSize, supportedVersions,
-          cacheEntry != null);
+          ecPolicyName, storagePolicy, cacheEntry != null);
     } finally {
       RetryCache.setState(cacheEntry, status != null, status);
     }
@@ -778,6 +841,9 @@ class NameNodeRpcServer implements NamenodeProtocols {
       RetryCache.setState(cacheEntry, success, info);
     }
     metrics.incrFilesAppended();
+    if (shouldSendQOP) {
+      wrapEstablishedQOP(info.getLastBlock(), getEstablishedClientQOP());
+    }
     return info;
   }
 
@@ -846,6 +912,9 @@ class NameNodeRpcServer implements NamenodeProtocols {
     if (locatedBlock != null) {
       metrics.incrAddBlockOps();
     }
+    if (shouldSendQOP) {
+      wrapEstablishedQOP(locatedBlock, getEstablishedClientQOP());
+    }
     return locatedBlock;
   }
 
@@ -876,8 +945,13 @@ class NameNodeRpcServer implements NamenodeProtocols {
         excludeSet.add(node);
       }
     }
-    return namesystem.getAdditionalDatanode(src, fileId, blk, existings,
-        existingStorageIDs, excludeSet, numAdditionalNodes, clientName);
+    LocatedBlock locatedBlock = namesystem.getAdditionalDatanode(src, fileId,
+        blk, existings, existingStorageIDs, excludeSet, numAdditionalNodes,
+        clientName);
+    if (shouldSendQOP) {
+      wrapEstablishedQOP(locatedBlock, getEstablishedClientQOP());
+    }
+    return locatedBlock;
   }
   /**
    * The client needs to give up on the block.
@@ -1117,12 +1191,25 @@ class NameNodeRpcServer implements NamenodeProtocols {
   }
 
   @Override // ClientProtocol
-  public HdfsFileStatus getFileInfo(String src)  throws IOException {
+  public HdfsFileStatus getFileInfo(String src) throws IOException {
     checkNNStartup();
     metrics.incrFileInfoOps();
-    return namesystem.getFileInfo(src, true);
+    return namesystem.getFileInfo(src, true, false, false);
   }
-  
+
+  @Override // ClientProtocol
+  public HdfsLocatedFileStatus getLocatedFileInfo(String src,
+      boolean needBlockToken) throws IOException {
+    checkNNStartup();
+    if (needBlockToken) {
+      metrics.incrGetBlockLocations();
+    } else {
+      metrics.incrFileInfoOps();
+    }
+    return (HdfsLocatedFileStatus)
+        namesystem.getFileInfo(src, true, true, needBlockToken);
+  }
+
   @Override // ClientProtocol
   public boolean isFileClosed(String src) throws IOException{
     checkNNStartup();
@@ -1133,7 +1220,7 @@ class NameNodeRpcServer implements NamenodeProtocols {
   public HdfsFileStatus getFileLinkInfo(String src) throws IOException {
     checkNNStartup();
     metrics.incrFileInfoOps();
-    return namesystem.getFileInfo(src, false);
+    return namesystem.getFileInfo(src, false, false, false);
   }
   
   @Override // ClientProtocol
@@ -1141,6 +1228,20 @@ class NameNodeRpcServer implements NamenodeProtocols {
     checkNNStartup();
     namesystem.checkOperation(OperationCategory.READ);
     return namesystem.getStats();
+  }
+
+  @Override // ClientProtocol
+  public ReplicatedBlockStats getReplicatedBlockStats() throws IOException {
+    checkNNStartup();
+    namesystem.checkOperation(OperationCategory.READ);
+    return namesystem.getReplicatedBlockStats();
+  }
+
+  @Override // ClientProtocol
+  public ECBlockGroupStats getECBlockGroupStats() throws IOException {
+    checkNNStartup();
+    namesystem.checkOperation(OperationCategory.READ);
+    return namesystem.getECBlockGroupStats();
   }
 
   @Override // ClientProtocol
@@ -1216,7 +1317,7 @@ class NameNodeRpcServer implements NamenodeProtocols {
     checkNNStartup();
     namesystem.checkOperation(OperationCategory.UNCHECKED);
     namesystem.checkSuperuserPrivilege();
-    return namesystem.getFSImage().getLastAppliedOrWrittenTxId();
+    return namesystem.getFSImage().getCorrectLastAppliedOrWrittenTxId();
   }
   
   @Override // NamenodeProtocol
@@ -1230,7 +1331,6 @@ class NameNodeRpcServer implements NamenodeProtocols {
   @Override // NamenodeProtocol
   public CheckpointSignature rollEditLog() throws IOException {
     checkNNStartup();
-    namesystem.checkSuperuserPrivilege();
     return namesystem.rollEditLog();
   }
   
@@ -1249,11 +1349,24 @@ class NameNodeRpcServer implements NamenodeProtocols {
     namesystem.checkSuperuserPrivilege();
     return namesystem.isUpgradeFinalized();
   }
+
+  @Override // NamenodeProtocol
+  public boolean isRollingUpgrade() throws IOException {
+    checkNNStartup();
+    namesystem.checkSuperuserPrivilege();
+    return namesystem.isRollingUpgrade();
+  }
     
   @Override // ClientProtocol
   public void finalizeUpgrade() throws IOException {
     checkNNStartup();
     namesystem.finalizeUpgrade();
+  }
+
+  @Override // ClientProtocol
+  public boolean upgradeStatus() throws IOException {
+    checkNNStartup();
+    return namesystem.isUpgradeFinalized();
   }
 
   @Override // ClientProtocol
@@ -1276,6 +1389,33 @@ class NameNodeRpcServer implements NamenodeProtocols {
   public void metaSave(String filename) throws IOException {
     checkNNStartup();
     namesystem.metaSave(filename);
+  }
+
+  @Deprecated
+  @Override // ClientProtocol
+  public BatchedEntries<OpenFileEntry> listOpenFiles(long prevId)
+      throws IOException {
+    return listOpenFiles(prevId, EnumSet.of(OpenFilesType.ALL_OPEN_FILES),
+        OpenFilesIterator.FILTER_PATH_DEFAULT);
+  }
+
+  @Override // ClientProtocol
+  public BatchedEntries<OpenFileEntry> listOpenFiles(long prevId,
+      EnumSet<OpenFilesType> openFilesTypes, String path) throws IOException {
+    checkNNStartup();
+    return namesystem.listOpenFiles(prevId, openFilesTypes, path);
+  }
+
+  @Override // ClientProtocol
+  public void msync() throws IOException {
+    // Check for write access to ensure that msync only happens on active
+    namesystem.checkOperation(OperationCategory.WRITE);
+  }
+
+  @Override // ClientProtocol
+  public HAServiceState getHAServiceState() throws IOException {
+    checkNNStartup();
+    return nn.getServiceStatus().getState();
   }
 
   @Override // ClientProtocol
@@ -1316,6 +1456,23 @@ class NameNodeRpcServer implements NamenodeProtocols {
   public QuotaUsage getQuotaUsage(String path) throws IOException {
     checkNNStartup();
     return namesystem.getQuotaUsage(path);
+  }
+
+  @Override // ClientProtocol
+  public void satisfyStoragePolicy(String src) throws IOException {
+    checkNNStartup();
+    namesystem.checkOperation(OperationCategory.WRITE);
+    CacheEntry cacheEntry = RetryCache.waitForCompletion(retryCache);
+    if (cacheEntry != null && cacheEntry.isSuccess()) {
+      return; // Return previous response
+    }
+    boolean success = false;
+    try {
+      namesystem.satisfyStoragePolicy(src, cacheEntry != null);
+      success = true;
+    } finally {
+      RetryCache.setState(cacheEntry, success);
+    }
   }
 
   @Override // ClientProtocol
@@ -1380,7 +1537,7 @@ class NameNodeRpcServer implements NamenodeProtocols {
     metrics.incrGetLinkTargetOps();
     HdfsFileStatus stat = null;
     try {
-      stat = namesystem.getFileInfo(path, false);
+      stat = namesystem.getFileInfo(path, false, false, false);
     } catch (UnresolvedPathException e) {
       return e.getResolvedPath().toString();
     } catch (UnresolvedLinkException e) {
@@ -1392,7 +1549,7 @@ class NameNodeRpcServer implements NamenodeProtocols {
     } else if (!stat.isSymlink()) {
       throw new IOException("Path " + path + " is not a symbolic link");
     }
-    return stat.getSymlink();
+    return DFSUtilClient.bytes2String(stat.getSymlinkInBytes());
   }
 
 
@@ -1410,12 +1567,16 @@ class NameNodeRpcServer implements NamenodeProtocols {
       StorageReport[] report, long dnCacheCapacity, long dnCacheUsed,
       int xmitsInProgress, int xceiverCount,
       int failedVolumes, VolumeFailureSummary volumeFailureSummary,
-      boolean requestFullBlockReportLease) throws IOException {
+      boolean requestFullBlockReportLease,
+      @Nonnull SlowPeerReports slowPeers,
+      @Nonnull SlowDiskReports slowDisks)
+          throws IOException {
     checkNNStartup();
     verifyRequest(nodeReg);
     return namesystem.handleHeartbeat(nodeReg, report,
         dnCacheCapacity, dnCacheUsed, xceiverCount, xmitsInProgress,
-        failedVolumes, volumeFailureSummary, requestFullBlockReportLease);
+        failedVolumes, volumeFailureSummary, requestFullBlockReportLease,
+        slowPeers, slowDisks);
   }
 
   @Override // DatanodeProtocol
@@ -1442,17 +1603,18 @@ class NameNodeRpcServer implements NamenodeProtocols {
         @Override
         public Boolean call() throws IOException {
           return bm.processReport(nodeReg, reports[index].getStorage(),
-              blocks, context, (index == reports.length - 1));
+              blocks, context);
         }
       });
-      metrics.incrStorageBlockReportOps();
     }
+    bm.removeBRLeaseIfNeeded(nodeReg, context);
+
     BlockManagerFaultInjector.getInstance().
         incomingBlockReportRpc(nodeReg, context);
 
     if (nn.getFSImage().isUpgradeFinalized() &&
         !namesystem.isRollingUpgrade() &&
-        !nn.isStandbyState() &&
+        nn.isActiveState() &&
         noStaleStorages) {
       return new FinalizeCommand(poolId);
     }
@@ -1530,7 +1692,6 @@ class NameNodeRpcServer implements NamenodeProtocols {
   @Override // DatanodeProtocol, NamenodeProtocol
   public NamespaceInfo versionRequest() throws IOException {
     checkNNStartup();
-    namesystem.checkSuperuserPrivilege();
     return namesystem.getNamespaceInfo();
   }
 
@@ -1574,6 +1735,7 @@ class NameNodeRpcServer implements NamenodeProtocols {
     if (this.serviceRpcServer != null) {
       this.serviceRpcServer.refreshServiceAcl(new Configuration(), new HDFSPolicyProvider());
     }
+    namesystem.logAuditEvent(true, "refreshServiceAcl", null);
   }
 
   @Override // RefreshAuthorizationPolicyProtocol
@@ -1581,17 +1743,19 @@ class NameNodeRpcServer implements NamenodeProtocols {
     LOG.info("Refreshing all user-to-groups mappings. Requested by user: " +
         getRemoteUser().getShortUserName());
     Groups.getUserToGroupsMappingService().refresh();
+    namesystem.logAuditEvent(true, "refreshUserToGroupsMappings", null);
   }
 
   @Override // RefreshAuthorizationPolicyProtocol
-  public void refreshSuperUserGroupsConfiguration() {
+  public void refreshSuperUserGroupsConfiguration() throws IOException {
     LOG.info("Refreshing SuperUser proxy group mapping list ");
 
     ProxyUsers.refreshSuperUserGroupsConfiguration();
+    namesystem.logAuditEvent(true, "refreshSuperUserGroupsConfiguration", null);
   }
 
   @Override // RefreshCallQueueProtocol
-  public void refreshCallQueue() {
+  public void refreshCallQueue() throws IOException {
     LOG.info("Refreshing call queue.");
 
     Configuration conf = new Configuration();
@@ -1599,6 +1763,7 @@ class NameNodeRpcServer implements NamenodeProtocols {
     if (this.serviceRpcServer != null) {
       serviceRpcServer.refreshCallQueue(conf);
     }
+    namesystem.logAuditEvent(true, "refreshCallQueue", null);
   }
 
   @Override // GenericRefreshProtocol
@@ -1636,6 +1801,14 @@ class NameNodeRpcServer implements NamenodeProtocols {
     checkNNStartup();
     nn.checkHaStateChange(req);
     nn.transitionToStandby();
+  }
+
+  @Override // HAServiceProtocol
+  public synchronized void transitionToObserver(StateChangeRequestInfo req)
+      throws ServiceFailedException, AccessControlException, IOException {
+    checkNNStartup();
+    nn.checkHaStateChange(req);
+    nn.transitionToObserver();
   }
 
   @Override // HAServiceProtocol
@@ -1686,14 +1859,22 @@ class NameNodeRpcServer implements NamenodeProtocols {
   }
 
   private static String getClientMachine() {
-    String clientMachine = NamenodeWebHdfsMethods.getRemoteAddress();
-    if (clientMachine == null) { //not a web client
-      clientMachine = Server.getRemoteAddress();
-    }
+    String clientMachine = Server.getRemoteAddress();
     if (clientMachine == null) { //not a RPC client
       clientMachine = "";
     }
     return clientMachine;
+  }
+
+  /**
+   * Return the QOP of the client that the current handler thread
+   * is handling. Assuming the negotiation is done at this point,
+   * otherwise returns null.
+   *
+   * @return the established QOP of this client.
+   */
+  private static String getEstablishedClientQOP() {
+    return Server.getEstablishedQOP();
   }
 
   @Override
@@ -1806,6 +1987,18 @@ class NameNodeRpcServer implements NamenodeProtocols {
     checkNNStartup();
     SnapshotDiffReport report = namesystem.getSnapshotDiffReport(snapshotRoot,
         earlierSnapshotName, laterSnapshotName);
+    metrics.incrSnapshotDiffReportOps();
+    return report;
+  }
+
+  @Override // ClientProtocol
+  public SnapshotDiffReportListing getSnapshotDiffReportListing(
+      String snapshotRoot, String earlierSnapshotName, String laterSnapshotName,
+      byte[] startPath, int index) throws IOException {
+    checkNNStartup();
+    SnapshotDiffReportListing report = namesystem
+        .getSnapshotDiffReportListing(snapshotRoot, earlierSnapshotName,
+            laterSnapshotName, startPath, index);
     metrics.incrSnapshotDiffReportOps();
     return report;
   }
@@ -2007,7 +2200,32 @@ class NameNodeRpcServer implements NamenodeProtocols {
   }
 
   @Override // ClientProtocol
-  public void setErasureCodingPolicy(String src, ErasureCodingPolicy ecPolicy)
+  public void reencryptEncryptionZone(final String zone,
+      final ReencryptAction action) throws IOException {
+    checkNNStartup();
+    namesystem.checkOperation(OperationCategory.WRITE);
+    final CacheEntry cacheEntry = RetryCache.waitForCompletion(retryCache);
+    if (cacheEntry != null && cacheEntry.isSuccess()) {
+      return;
+    }
+    boolean success = false;
+    try {
+      namesystem.reencryptEncryptionZone(zone, action, cacheEntry != null);
+      success = true;
+    } finally {
+      RetryCache.setState(cacheEntry, success);
+    }
+  }
+
+  @Override // ClientProtocol
+  public BatchedEntries<ZoneReencryptionStatus> listReencryptionStatus(
+      final long prevId) throws IOException {
+    checkNNStartup();
+    return namesystem.listReencryptionStatus(prevId);
+  }
+
+  @Override // ClientProtocol
+  public void setErasureCodingPolicy(String src, String ecPolicyName)
       throws IOException {
     checkNNStartup();
     final CacheEntry cacheEntry = RetryCache.waitForCompletion(retryCache);
@@ -2016,7 +2234,13 @@ class NameNodeRpcServer implements NamenodeProtocols {
     }
     boolean success = false;
     try {
-      namesystem.setErasureCodingPolicy(src, ecPolicy, cacheEntry != null);
+      if (ecPolicyName == null) {
+        ecPolicyName = defaultECPolicyName;
+        LOG.trace("No policy name is specified, " +
+            "set the default policy name instead");
+      }
+      LOG.trace("Set erasure coding policy " + ecPolicyName + " on " + src);
+      namesystem.setErasureCodingPolicy(src, ecPolicyName, cacheEntry != null);
       success = true;
     } finally {
       RetryCache.setState(cacheEntry, success);
@@ -2073,7 +2297,8 @@ class NameNodeRpcServer implements NamenodeProtocols {
 
   private void checkNNStartup() throws IOException {
     if (!this.nn.isStarted()) {
-      throw new RetriableException(this.nn.getRole() + " still not started");
+      String message = NameNode.composeNotStartedMessage(this.nn.getRole());
+      throw new RetriableException(message);
     }
   }
 
@@ -2106,7 +2331,7 @@ class NameNodeRpcServer implements NamenodeProtocols {
     } catch (FileNotFoundException e) {
       LOG.debug("Tried to read from deleted or moved edit log segment", e);
       return null;
-    } catch (TransferFsImage.HttpGetFailedException e) {
+    } catch (HttpGetFailedException e) {
       LOG.debug("Tried to read from deleted edit log segment", e);
       return null;
     }
@@ -2132,6 +2357,24 @@ class NameNodeRpcServer implements NamenodeProtocols {
     // guaranteed to have been written by this NameNode.)
     boolean readInProgress = syncTxid > 0;
 
+    // doas the NN login user for the actual operations to get edits.
+    // Notably this is necessary when polling from the remote edits via https.
+    // We have validated the client is a superuser from the NN RPC, so this
+    // running as the login user here is safe.
+    EventBatchList ret = SecurityUtil.doAsLoginUser(
+        new PrivilegedExceptionAction<EventBatchList>() {
+          @Override
+          public EventBatchList run() throws IOException {
+            return getEventBatchList(syncTxid, txid, log, readInProgress,
+                maxEventsPerRPC);
+          }
+        });
+    return ret;
+  }
+
+  private EventBatchList getEventBatchList(long syncTxid, long txid,
+      FSEditLog log, boolean readInProgress, int maxEventsPerRPC)
+      throws IOException {
     List<EventBatch> batches = Lists.newArrayList();
     int totalEvents = 0;
     long maxSeenTxid = -1;
@@ -2150,7 +2393,7 @@ class NameNodeRpcServer implements NamenodeProtocols {
       // and are using QJM -- the edit log will be closed and this exception
       // will result
       LOG.info("NN is transitioning from active to standby and FSEditLog " +
-      "is closed -- could not read edits");
+          "is closed -- could not read edits");
       return new EventBatchList(batches, firstSeenTxid, maxSeenTxid, syncTxid);
     }
 
@@ -2220,9 +2463,16 @@ class NameNodeRpcServer implements NamenodeProtocols {
   }
 
   @Override // ClientProtocol
-  public ErasureCodingPolicy[] getErasureCodingPolicies() throws IOException {
+  public ErasureCodingPolicyInfo[] getErasureCodingPolicies()
+      throws IOException {
     checkNNStartup();
     return namesystem.getErasureCodingPolicies();
+  }
+
+  @Override // ClientProtocol
+  public Map<String, String> getErasureCodingCodecs() throws IOException {
+    checkNNStartup();
+    return namesystem.getErasureCodingCodecs();
   }
 
   @Override // ClientProtocol
@@ -2231,25 +2481,172 @@ class NameNodeRpcServer implements NamenodeProtocols {
     return namesystem.getErasureCodingPolicy(src);
   }
 
+  @Override // ClientProtocol
+  public void unsetErasureCodingPolicy(String src) throws IOException {
+    checkNNStartup();
+    final CacheEntry cacheEntry = RetryCache.waitForCompletion(retryCache);
+    if (cacheEntry != null && cacheEntry.isSuccess()) {
+      return;
+    }
+    boolean success = false;
+    try {
+      namesystem.unsetErasureCodingPolicy(src, cacheEntry != null);
+      success = true;
+    } finally {
+      RetryCache.setState(cacheEntry, success);
+    }
+  }
+
+  @Override
+  public AddErasureCodingPolicyResponse[] addErasureCodingPolicies(
+      ErasureCodingPolicy[] policies) throws IOException {
+    checkNNStartup();
+    namesystem.checkSuperuserPrivilege();
+    final CacheEntryWithPayload cacheEntry =
+        RetryCache.waitForCompletion(retryCache, null);
+    if (cacheEntry != null && cacheEntry.isSuccess()) {
+      return (AddErasureCodingPolicyResponse[]) cacheEntry.getPayload();
+    }
+    boolean success = false;
+    AddErasureCodingPolicyResponse[] responses =
+        new AddErasureCodingPolicyResponse[0];
+    try {
+      responses =
+          namesystem.addErasureCodingPolicies(policies, cacheEntry != null);
+      success = true;
+    } finally {
+      RetryCache.setState(cacheEntry, success, responses);
+    }
+    return responses;
+  }
+
+  @Override
+  public void removeErasureCodingPolicy(String ecPolicyName)
+      throws IOException {
+    checkNNStartup();
+    namesystem.checkSuperuserPrivilege();
+    final CacheEntry cacheEntry = RetryCache.waitForCompletion(retryCache);
+    if (cacheEntry != null && cacheEntry.isSuccess()) {
+      return;
+    }
+    boolean success = false;
+    try {
+      namesystem.removeErasureCodingPolicy(ecPolicyName, cacheEntry != null);
+      success = true;
+    } finally {
+      RetryCache.setState(cacheEntry, success);
+    }
+  }
+
+  @Override // ClientProtocol
+  public void enableErasureCodingPolicy(String ecPolicyName)
+      throws IOException {
+    checkNNStartup();
+    namesystem.checkSuperuserPrivilege();
+    final CacheEntry cacheEntry = RetryCache.waitForCompletion(retryCache);
+    if (cacheEntry != null && cacheEntry.isSuccess()) {
+      return;
+    }
+    boolean success = false;
+    try {
+      success = namesystem.enableErasureCodingPolicy(ecPolicyName,
+          cacheEntry != null);
+    } finally {
+      RetryCache.setState(cacheEntry, success);
+    }
+  }
+
+  @Override // ClientProtocol
+  public void disableErasureCodingPolicy(String ecPolicyName)
+      throws IOException {
+    checkNNStartup();
+    namesystem.checkSuperuserPrivilege();
+    final CacheEntry cacheEntry = RetryCache.waitForCompletion(retryCache);
+    if (cacheEntry != null && cacheEntry.isSuccess()) {
+      return;
+    }
+    boolean success = false;
+    try {
+      success = namesystem.disableErasureCodingPolicy(ecPolicyName,
+          cacheEntry != null);
+    } finally {
+      RetryCache.setState(cacheEntry, success);
+    }
+  }
+
   @Override // ReconfigurationProtocol
   public void startReconfiguration() throws IOException {
     checkNNStartup();
-    namesystem.checkSuperuserPrivilege();
+    String operationName = "startNamenodeReconfiguration";
+    namesystem.checkSuperuserPrivilege(operationName);
     nn.startReconfigurationTask();
+    namesystem.logAuditEvent(true, operationName, null);
   }
 
   @Override // ReconfigurationProtocol
   public ReconfigurationTaskStatus getReconfigurationStatus()
       throws IOException {
     checkNNStartup();
-    namesystem.checkSuperuserPrivilege();
-    return nn.getReconfigurationTaskStatus();
+    String operationName = "getNamenodeReconfigurationStatus";
+    namesystem.checkSuperuserPrivilege(operationName);
+    ReconfigurationTaskStatus status = nn.getReconfigurationTaskStatus();
+    namesystem.logAuditEvent(true, operationName, null);
+    return status;
   }
 
   @Override // ReconfigurationProtocol
   public List<String> listReconfigurableProperties() throws IOException {
     checkNNStartup();
-    namesystem.checkSuperuserPrivilege();
-    return Lists.newArrayList(nn.getReconfigurableProperties());
+    String operationName = "listNamenodeReconfigurableProperties";
+    namesystem.checkSuperuserPrivilege(operationName);
+    List<String> result = Lists.newArrayList(nn.getReconfigurableProperties());
+    namesystem.logAuditEvent(true, operationName, null);
+    return result;
+  }
+
+  @Override
+  public Long getNextSPSPath() throws IOException {
+    checkNNStartup();
+    String operationName = "getNextSPSPath";
+    namesystem.checkSuperuserPrivilege(operationName);
+    if (nn.isStandbyState()) {
+      throw new StandbyException("Not supported by Standby Namenode.");
+    }
+    // Check that SPS is enabled externally
+    StoragePolicySatisfyManager spsMgr =
+        namesystem.getBlockManager().getSPSManager();
+    StoragePolicySatisfierMode spsMode = (spsMgr != null ? spsMgr.getMode()
+        : StoragePolicySatisfierMode.NONE);
+    if (spsMode != StoragePolicySatisfierMode.EXTERNAL) {
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("SPS service mode is {}, so external SPS service is "
+            + "not allowed to fetch the path Ids", spsMode);
+      }
+      throw new IOException("SPS service mode is " + spsMode + ", so "
+          + "external SPS service is not allowed to fetch the path Ids");
+    }
+    return namesystem.getBlockManager().getSPSManager().getNextPathId();
+  }
+
+
+  /**
+   * Wrapping the QOP information into the LocatedBlock instance.
+   * The wrapped QOP will be used by DataNode, i.e. DataNode will simply use
+   * this QOP to accept client calls, because this this QOP is viewed
+   * as the QOP that NameNode has accepted.
+   *
+   * @param locatedBlock the LocatedBlock instance
+   * @param qop the QOP to wrap in
+   * @throws RuntimeException
+   */
+  private void wrapEstablishedQOP(LocatedBlock locatedBlock, String qop) {
+    if (qop == null || locatedBlock == null) {
+      return;
+    }
+    BlockTokenSecretManager btsm = namesystem.getBlockManager()
+        .getBlockTokenSecretManager();
+    Token<BlockTokenIdentifier> token = locatedBlock.getBlockToken();
+    byte[] secret = btsm.secretGen(qop.getBytes(Charsets.UTF_8));
+    token.setDNHandshakeSecret(secret);
   }
 }

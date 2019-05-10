@@ -32,6 +32,8 @@ import java.util.UUID;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.yarn.api.ApplicationClientProtocol;
+import org.apache.hadoop.yarn.api.protocolrecords.GetNewReservationRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetNewReservationResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.ReservationDeleteRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.ReservationListRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.ReservationListResponse;
@@ -45,7 +47,6 @@ import org.apache.hadoop.yarn.api.records.ReservationRequest;
 import org.apache.hadoop.yarn.api.records.ReservationRequestInterpreter;
 import org.apache.hadoop.yarn.api.records.ReservationRequests;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
-import org.apache.hadoop.yarn.event.DrainDispatcher;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.server.resourcemanager.reservation.Plan;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
@@ -242,8 +243,8 @@ public class ReservationACLsTestBase extends ACLsTestBase {
 
   private void verifySubmitReservationSuccess(String submitter, String
           queueName) throws Exception {
-    ReservationId reservationId =
-            submitReservation(submitter, queueName);
+    ReservationId reservationId = createReservation(submitter);
+    submitReservation(submitter, queueName, reservationId);
 
     deleteReservation(submitter, reservationId);
   }
@@ -251,7 +252,8 @@ public class ReservationACLsTestBase extends ACLsTestBase {
   private void verifySubmitReservationFailure(String submitter, String
           queueName) throws Exception {
     try {
-      submitReservation(submitter, queueName);
+      ReservationId reservationId = createReservation(submitter);
+      submitReservation(submitter, queueName, reservationId);
       Assert.fail("Submit reservation by the enemy should fail!");
     } catch (YarnException e) {
       handleAdministerException(e, submitter, queueName, ReservationACL
@@ -261,8 +263,8 @@ public class ReservationACLsTestBase extends ACLsTestBase {
 
   private void verifyListReservationSuccess(String lister, String
           originalSubmitter, String queueName) throws Exception {
-    ReservationId reservationId =
-            submitReservation(originalSubmitter, queueName);
+    ReservationId reservationId = createReservation(originalSubmitter);
+    submitReservation(originalSubmitter, queueName, reservationId);
 
     ReservationListResponse adminResponse = listReservation(lister, queueName);
 
@@ -275,8 +277,8 @@ public class ReservationACLsTestBase extends ACLsTestBase {
 
   private void verifyListReservationFailure(String lister,
           String originalSubmitter, String queueName) throws Exception {
-    ReservationId reservationId =
-            submitReservation(originalSubmitter, queueName);
+    ReservationId reservationId = createReservation(originalSubmitter);
+    submitReservation(originalSubmitter, queueName, reservationId);
 
     try {
       listReservation(lister, queueName);
@@ -291,8 +293,8 @@ public class ReservationACLsTestBase extends ACLsTestBase {
 
   private void verifyListReservationByIdSuccess(String lister, String
           originalSubmitter, String queueName) throws Exception {
-    ReservationId reservationId =
-            submitReservation(originalSubmitter, queueName);
+    ReservationId reservationId = createReservation(originalSubmitter);
+    submitReservation(originalSubmitter, queueName, reservationId);
 
     ReservationListResponse adminResponse = listReservationById(lister,
             reservationId, queueName);
@@ -306,8 +308,8 @@ public class ReservationACLsTestBase extends ACLsTestBase {
 
   private void verifyListReservationByIdFailure(String lister,
           String originalSubmitter, String queueName) throws Exception {
-    ReservationId reservationId =
-            submitReservation(originalSubmitter, queueName);
+    ReservationId reservationId = createReservation(originalSubmitter);
+    submitReservation(originalSubmitter, queueName, reservationId);
     try {
       listReservationById(lister, reservationId, queueName);
       Assert.fail("List reservation by the enemy should fail!");
@@ -321,8 +323,8 @@ public class ReservationACLsTestBase extends ACLsTestBase {
 
   private void verifyDeleteReservationSuccess(String killer,
           String originalSubmitter, String queueName) throws Exception {
-    ReservationId reservationId =
-            submitReservation(originalSubmitter, queueName);
+    ReservationId reservationId = createReservation(originalSubmitter);
+    submitReservation(originalSubmitter, queueName, reservationId);
 
     deleteReservation(killer, reservationId);
   }
@@ -330,8 +332,8 @@ public class ReservationACLsTestBase extends ACLsTestBase {
   private void verifyDeleteReservationFailure(String killer,
           String originalSubmitter, String queueName) throws Exception {
 
-    ReservationId reservationId =
-        submitReservation(originalSubmitter, queueName);
+    ReservationId reservationId = createReservation(originalSubmitter);
+    submitReservation(originalSubmitter, queueName, reservationId);
 
     try {
       deleteReservation(killer, reservationId);
@@ -346,8 +348,8 @@ public class ReservationACLsTestBase extends ACLsTestBase {
 
   private void verifyUpdateReservationSuccess(String updater,
           String originalSubmitter, String queueName) throws Exception {
-    ReservationId reservationId =
-            submitReservation(originalSubmitter, queueName);
+    ReservationId reservationId = createReservation(originalSubmitter);
+    submitReservation(originalSubmitter, queueName, reservationId);
 
     final ReservationUpdateRequest updateRequest =
             ReservationUpdateRequest.newInstance(
@@ -362,8 +364,8 @@ public class ReservationACLsTestBase extends ACLsTestBase {
 
   private void verifyUpdateReservationFailure(String updater,
           String originalSubmitter, String queueName) throws Exception {
-    ReservationId reservationId =
-            submitReservation(originalSubmitter, queueName);
+    ReservationId reservationId = createReservation(originalSubmitter);
+    submitReservation(originalSubmitter, queueName, reservationId);
 
     final ReservationUpdateRequest updateRequest =
             ReservationUpdateRequest.newInstance(
@@ -422,17 +424,27 @@ public class ReservationACLsTestBase extends ACLsTestBase {
     deleteClient.deleteReservation(deleteRequest);
   }
 
-  private ReservationId submitReservation(String submitter,
-      String queueName) throws Exception {
+  private ReservationId createReservation(String creator) throws Exception {
+
+    ApplicationClientProtocol creatorClient = getRMClientForUser(creator);
+    GetNewReservationRequest getNewReservationRequest =
+        GetNewReservationRequest.newInstance();
+
+    GetNewReservationResponse response = creatorClient
+        .getNewReservation(getNewReservationRequest);
+    return response.getReservationId();
+  }
+
+  private void submitReservation(String submitter,
+      String queueName, ReservationId reservationId) throws Exception {
 
     ApplicationClientProtocol submitterClient = getRMClientForUser(submitter);
     ReservationSubmissionRequest reservationSubmissionRequest =
-            ReservationSubmissionRequest.newInstance(
-                    makeSimpleReservationDefinition(), queueName);
+        ReservationSubmissionRequest.newInstance(
+        makeSimpleReservationDefinition(), queueName, reservationId);
 
     ReservationSubmissionResponse response = submitterClient
             .submitReservation(reservationSubmissionRequest);
-    return response.getReservationId();
   }
 
   private void handleAdministerException(Exception e, String user, String
@@ -450,9 +462,7 @@ public class ReservationACLsTestBase extends ACLsTestBase {
       int attempts = 10;
       Collection<Plan> plans;
       do {
-        DrainDispatcher dispatcher =
-                (DrainDispatcher) resourceManager.getRMContext().getDispatcher();
-        dispatcher.await();
+        resourceManager.drainEvents();
         LOG.info("Waiting for node capacity to be added to plan");
         plans = resourceManager.getRMContext().getReservationSystem()
                 .getAllPlans().values();
@@ -475,7 +485,7 @@ public class ReservationACLsTestBase extends ACLsTestBase {
 
   private boolean checkCapacity(Collection<Plan> plans) {
     for (Plan plan : plans) {
-      if (plan.getTotalCapacity().getMemory() > 0) {
+      if (plan.getTotalCapacity().getMemorySize() > 0) {
         return true;
       }
     }
@@ -536,8 +546,8 @@ public class ReservationACLsTestBase extends ACLsTestBase {
     csConf.setBoolean(YarnConfiguration.RM_RESERVATION_SYSTEM_ENABLE, true);
     csConf.setBoolean(YarnConfiguration.YARN_ACL_ENABLE, true);
     csConf.setBoolean(YarnConfiguration.YARN_RESERVATION_ACL_ENABLE, true);
-    csConf.set("yarn.resourcemanager.scheduler.class", CapacityScheduler
-            .class.getName());
+    csConf.set(YarnConfiguration.RM_SCHEDULER,
+        CapacityScheduler.class.getName());
 
     return csConf;
   }
@@ -553,6 +563,8 @@ public class ReservationACLsTestBase extends ACLsTestBase {
     PrintWriter out = new PrintWriter(new FileWriter(ALLOC_FILE));
     out.println("<?xml version=\"1.0\"?>");
     out.println("<allocations>");
+    out.println("  <defaultQueueSchedulingPolicy>drf" +
+        "</defaultQueueSchedulingPolicy>");
     out.println("  <queue name=\"queueA\">");
     out.println("    <aclSubmitReservations>" +
             "queueA_user,common_user " +
@@ -587,8 +599,7 @@ public class ReservationACLsTestBase extends ACLsTestBase {
     fsConf.setBoolean(YarnConfiguration.RM_RESERVATION_SYSTEM_ENABLE, true);
     fsConf.setBoolean(YarnConfiguration.YARN_ACL_ENABLE, true);
     fsConf.setBoolean(YarnConfiguration.YARN_RESERVATION_ACL_ENABLE, true);
-    fsConf.set("yarn.resourcemanager.scheduler.class", FairScheduler.class
-            .getName());
+    fsConf.set(YarnConfiguration.RM_SCHEDULER, FairScheduler.class.getName());
 
     return fsConf;
   }

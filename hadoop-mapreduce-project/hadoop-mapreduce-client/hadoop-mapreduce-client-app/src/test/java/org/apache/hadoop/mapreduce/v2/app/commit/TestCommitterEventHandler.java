@@ -48,12 +48,9 @@ import java.io.IOException;
 import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.mapreduce.JobContext;
 import org.apache.hadoop.mapreduce.MRJobConfig;
-import org.apache.hadoop.mapreduce.OutputCommitter;
 import org.apache.hadoop.mapreduce.TypeConverter;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
-import org.apache.hadoop.mapreduce.v2.app.AppContext;
 import org.apache.hadoop.mapreduce.v2.app.job.event.JobCommitCompletedEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.JobCommitFailedEvent;
 import org.apache.hadoop.mapreduce.v2.util.MRApps;
@@ -62,18 +59,15 @@ import org.apache.hadoop.util.Time;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.Event;
-import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.util.Clock;
-import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.hadoop.yarn.util.SystemClock;
-import org.junit.After;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 public class TestCommitterEventHandler {
-  public static class WaitForItHandler implements EventHandler {
+  public static class WaitForItHandler implements EventHandler<Event> {
 
     private Event event = null;
     
@@ -129,8 +123,8 @@ public class TestCommitterEventHandler {
 
     SystemClock clock = SystemClock.getInstance();
     AppContext appContext = mock(AppContext.class);
-    ApplicationAttemptId attemptid = 
-      ConverterUtils.toApplicationAttemptId("appattempt_1234567890000_0001_0");
+    ApplicationAttemptId attemptid = ApplicationAttemptId.fromString(
+        "appattempt_1234567890000_0001_0");
     when(appContext.getApplicationID()).thenReturn(attemptid.getApplicationId());
     when(appContext.getApplicationAttemptId()).thenReturn(attemptid);
     when(appContext.getEventHandler()).thenReturn(
@@ -167,7 +161,7 @@ public class TestCommitterEventHandler {
     }
     Assert.assertEquals("committer did not complete commit after RM hearbeat",
         1, jeh.numCommitCompletedEvents);
-    verify(committer, times(1)).commitJob(any(JobContext.class));
+    verify(committer, times(1)).commitJob(any());
 
     //Clean up so we can try to commit again (Don't do this at home)
     cleanup();
@@ -182,7 +176,7 @@ public class TestCommitterEventHandler {
     }
     Assert.assertEquals("committer did not commit",
         2, jeh.numCommitCompletedEvents);
-    verify(committer, times(2)).commitJob(any(JobContext.class));
+    verify(committer, times(2)).commitJob(any());
 
     ceh.stop();
     dispatcher.stop();
@@ -240,8 +234,8 @@ public class TestCommitterEventHandler {
     YarnConfiguration conf = new YarnConfiguration();
     conf.set(MRJobConfig.MR_AM_STAGING_DIR, stagingDir);
     JobContext mockJobContext = mock(JobContext.class);
-    ApplicationAttemptId attemptid = 
-      ConverterUtils.toApplicationAttemptId("appattempt_1234567890000_0001_0");
+    ApplicationAttemptId attemptid = ApplicationAttemptId.fromString(
+        "appattempt_1234567890000_0001_0");
     JobId jobId =  TypeConverter.toYarn(
         TypeConverter.fromYarn(attemptid.getApplicationId()));
     
@@ -288,8 +282,8 @@ public class TestCommitterEventHandler {
     YarnConfiguration conf = new YarnConfiguration();
     conf.set(MRJobConfig.MR_AM_STAGING_DIR, stagingDir);
     JobContext mockJobContext = mock(JobContext.class);
-    ApplicationAttemptId attemptid = 
-      ConverterUtils.toApplicationAttemptId("appattempt_1234567890000_0001_0");
+    ApplicationAttemptId attemptid =
+        ApplicationAttemptId.fromString("appattempt_1234567890000_0001_0");
     JobId jobId =  TypeConverter.toYarn(
         TypeConverter.fromYarn(attemptid.getApplicationId()));
     

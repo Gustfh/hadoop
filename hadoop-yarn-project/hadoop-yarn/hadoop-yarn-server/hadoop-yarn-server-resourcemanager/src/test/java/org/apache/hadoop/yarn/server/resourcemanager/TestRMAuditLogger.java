@@ -23,6 +23,7 @@ import static org.mockito.Mockito.when;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
 
 import com.google.protobuf.BlockingService;
 import com.google.protobuf.RpcController;
@@ -43,6 +44,7 @@ import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.server.resourcemanager.RMAuditLogger.Keys;
 import org.junit.Assert;
 import org.junit.Before;
@@ -58,17 +60,21 @@ public class TestRMAuditLogger {
   private static final String TARGET = "tgt";
   private static final String PERM = "admin group";
   private static final String DESC = "description of an audit log";
+  private static final String QUEUE = "root";
   private static final ApplicationId APPID = mock(ApplicationId.class);
   private static final ApplicationAttemptId ATTEMPTID = mock(ApplicationAttemptId.class);
   private static final ContainerId CONTAINERID = mock(ContainerId.class);
+  private static final Resource RESOURCE = mock(Resource.class);
   private static final String CALLER_CONTEXT = "context";
   private static final byte[] CALLER_SIGNATURE = "signature".getBytes();
+  private static final String PARTITION = "label1";
 
   @Before
   public void setUp() throws Exception {
     when(APPID.toString()).thenReturn("app_1");
     when(ATTEMPTID.toString()).thenReturn("app_attempt_1");
     when(CONTAINERID.toString()).thenReturn("container_1");
+    when(RESOURCE.toString()).thenReturn("<memory:1536, vcores:1>");
   }
 
 
@@ -99,10 +105,18 @@ public class TestRMAuditLogger {
     expLog.append("\tTARGET=tgt");
     assertEquals(expLog.toString(), actLog.toString());
   }
-  
+
   private void testSuccessLogFormatHelper(boolean checkIP, ApplicationId appId,
       ApplicationAttemptId attemptId, ContainerId containerId) {
-    testSuccessLogFormatHelper(checkIP, appId, attemptId, containerId, null);
+    testSuccessLogFormatHelper(checkIP, appId, attemptId, containerId, null,
+        null);
+  }
+
+  private void testSuccessLogFormatHelper(boolean checkIP, ApplicationId appId,
+      ApplicationAttemptId attemptId, ContainerId containerId,
+      CallerContext callerContext, Resource resource) {
+    testSuccessLogFormatHelper(checkIP, appId, attemptId, containerId,
+        callerContext, resource, Server.getRemoteIp());
   }
 
   /**
@@ -110,13 +124,42 @@ public class TestRMAuditLogger {
    */
   private void testSuccessLogFormatHelper(boolean checkIP, ApplicationId appId,
       ApplicationAttemptId attemptId, ContainerId containerId,
-      CallerContext callerContext) {
-    String sLog = RMAuditLogger.createSuccessLog(USER, OPERATION, TARGET,
-        appId, attemptId, containerId, callerContext);
+      CallerContext callerContext, Resource resource, InetAddress remoteIp) {
+    testSuccessLogFormatHelper(checkIP, appId, attemptId, containerId,
+        callerContext, resource, remoteIp, null);
+  }
+
+  private void testSuccessLogFormatHelper(boolean checkIP, ApplicationId appId,
+        ApplicationAttemptId attemptId, ContainerId containerId,
+        CallerContext callerContext, Resource resource, InetAddress remoteIp,
+        RMAuditLogger.ArgsBuilder args) {
+    testSuccessLogFormatHelper(checkIP, appId, attemptId, containerId,
+        callerContext, resource, remoteIp, args, null, null);
+  }
+
+  private void testSuccessLogFormatHelper(boolean checkIP, ApplicationId appId,
+        ApplicationAttemptId attemptId, ContainerId containerId,
+        CallerContext callerContext, Resource resource, InetAddress remoteIp,
+        RMAuditLogger.ArgsBuilder args, String queueName, String partition) {
+    String sLog;
+    InetAddress tmpIp = checkIP ? remoteIp : null;
+    if (args != null) {
+      sLog = RMAuditLogger.createSuccessLog(USER, OPERATION, TARGET,
+          tmpIp, args);
+    } else {
+      sLog = RMAuditLogger.createSuccessLog(USER, OPERATION, TARGET, appId,
+          attemptId, containerId, resource, callerContext, tmpIp, queueName,
+          partition);
+    }
     StringBuilder expLog = new StringBuilder();
     expLog.append("USER=test\t");
     if (checkIP) {
-      InetAddress ip = Server.getRemoteIp();
+      InetAddress ip;
+      if(remoteIp != null) {
+        ip = remoteIp;
+      } else {
+        ip = Server.getRemoteIp();
+      }
       expLog.append(Keys.IP.name() + "=" + ip.getHostAddress() + "\t");
     }
     expLog.append("OPERATION=oper\tTARGET=tgt\tRESULT=SUCCESS");
@@ -130,6 +173,9 @@ public class TestRMAuditLogger {
     if (containerId != null) {
       expLog.append("\tCONTAINERID=container_1");
     }
+    if (resource != null) {
+      expLog.append("\tRESOURCE=<memory:1536, vcores:1>");
+    }
     if (callerContext != null) {
       if (callerContext.getContext() != null) {
         expLog.append("\tCALLERCONTEXT=context");
@@ -138,7 +184,25 @@ public class TestRMAuditLogger {
         expLog.append("\tCALLERSIGNATURE=signature");
       }
     }
+    if (args != null) {
+      expLog.append("\tQUEUENAME=root");
+      expLog.append("\tRECURSIVE=true");
+    } else {
+      if (queueName != null) {
+        expLog.append("\tQUEUENAME=" + QUEUE);
+      }
+    }
+    if (partition != null) {
+      expLog.append("\tNODELABEL=" + PARTITION);
+    }
     assertEquals(expLog.toString(), sLog);
+  }
+
+  private void testSuccessLogFormatHelperWithIP(boolean checkIP,
+      ApplicationId appId, ApplicationAttemptId attemptId,
+      ContainerId containerId, InetAddress ip) {
+    testSuccessLogFormatHelper(checkIP, appId, attemptId, containerId, null,
+        null, ip);
   }
 
   /**
@@ -146,7 +210,7 @@ public class TestRMAuditLogger {
    */
   private void testSuccessLogNulls(boolean checkIP) {
     String sLog = RMAuditLogger.createSuccessLog(null, null, null, null, 
-        null, null);
+        null, null, null);
     StringBuilder expLog = new StringBuilder();
     expLog.append("USER=null\t");
     if (checkIP) {
@@ -155,6 +219,33 @@ public class TestRMAuditLogger {
     }
     expLog.append("OPERATION=null\tTARGET=null\tRESULT=SUCCESS");
     assertEquals(expLog.toString(), sLog);
+  }
+
+  /**
+   * Tests the SuccessLog with two IP addresses.
+   *
+   * @param checkIP
+   * @param appId
+   * @param attemptId
+   * @param containerId
+   */
+  private void testSuccessLogFormatHelperWithIP(boolean checkIP,
+      ApplicationId appId, ApplicationAttemptId attemptId,
+      ContainerId containerId) {
+    testSuccessLogFormatHelperWithIP(checkIP, appId, attemptId, containerId,
+        InetAddress.getLoopbackAddress());
+    byte[] ipAddr = new byte[] {100, 10, 10, 1};
+
+    InetAddress addr = null;
+    try {
+      addr = InetAddress.getByAddress(ipAddr);
+    } catch (UnknownHostException uhe) {
+      // should not happen as long as IP address format
+      // stays the same
+      Assert.fail("Check ip address being constructed");
+    }
+    testSuccessLogFormatHelperWithIP(checkIP, appId, attemptId, containerId,
+        addr);
   }
 
   /**
@@ -170,22 +261,29 @@ public class TestRMAuditLogger {
     testSuccessLogFormatHelper(checkIP, APPID, null, CONTAINERID);
     testSuccessLogFormatHelper(checkIP, null, ATTEMPTID, CONTAINERID);
     testSuccessLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID);
-    testSuccessLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID, null);
+    testSuccessLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID, null, null);
     testSuccessLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID,
-        new CallerContext.Builder(null).setSignature(null).build());
+        new CallerContext.Builder(null).setSignature(null).build(), RESOURCE);
     testSuccessLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID,
-        new CallerContext.Builder(CALLER_CONTEXT).setSignature(null).build());
+        new CallerContext.Builder(CALLER_CONTEXT).setSignature(null).build(), RESOURCE);
     testSuccessLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID,
-        new CallerContext.Builder(null).setSignature(CALLER_SIGNATURE).build());
+        new CallerContext.Builder(null).setSignature(CALLER_SIGNATURE).build(), RESOURCE);
     testSuccessLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID,
         new CallerContext.Builder(CALLER_CONTEXT).setSignature(CALLER_SIGNATURE)
-            .build());
+            .build(), RESOURCE);
+    RMAuditLogger.ArgsBuilder args = new RMAuditLogger.ArgsBuilder()
+        .append(Keys.QUEUENAME, QUEUE).append(Keys.RECURSIVE, "true");
+    testSuccessLogFormatHelper(checkIP, null, null, null, null, null,
+        Server.getRemoteIp(), args);
+    testSuccessLogFormatHelper(checkIP, null, null, null, null, null,
+        Server.getRemoteIp(), null, QUEUE, PARTITION);
+    testSuccessLogFormatHelperWithIP(checkIP, APPID, ATTEMPTID, CONTAINERID);
     testSuccessLogNulls(checkIP);
   }
 
   private void testFailureLogFormatHelper(boolean checkIP, ApplicationId appId,
       ApplicationAttemptId attemptId, ContainerId containerId) {
-    testFailureLogFormatHelper(checkIP, appId, attemptId, containerId, null);
+    testFailureLogFormatHelper(checkIP, appId, attemptId, containerId, null, null);
   }
  
   /**
@@ -193,10 +291,20 @@ public class TestRMAuditLogger {
    */
   private void testFailureLogFormatHelper(boolean checkIP, ApplicationId appId,
       ApplicationAttemptId attemptId, ContainerId containerId,
-      CallerContext callerContext) {
-    String fLog =
+      CallerContext callerContext, Resource resource) {
+    testFailureLogFormatHelper(checkIP, appId, attemptId, containerId,
+        callerContext, resource, null);
+  }
+
+  private void testFailureLogFormatHelper(boolean checkIP, ApplicationId appId,
+        ApplicationAttemptId attemptId, ContainerId containerId,
+        CallerContext callerContext, Resource resource,
+        RMAuditLogger.ArgsBuilder args) {
+    String fLog = args == null ?
       RMAuditLogger.createFailureLog(USER, OPERATION, PERM, TARGET, DESC,
-      appId, attemptId, containerId, callerContext);
+          appId, attemptId, containerId, resource, callerContext, null) :
+        RMAuditLogger.createFailureLog(USER, OPERATION, PERM, TARGET, DESC,
+            args);
     StringBuilder expLog = new StringBuilder();
     expLog.append("USER=test\t");
     if (checkIP) {
@@ -215,6 +323,9 @@ public class TestRMAuditLogger {
     if (containerId != null) {
       expLog.append("\tCONTAINERID=container_1");
     }
+    if (resource != null) {
+      expLog.append("\tRESOURCE=<memory:1536, vcores:1>");
+    }
     if (callerContext != null) {
       if (callerContext.getContext() != null) {
         expLog.append("\tCALLERCONTEXT=context");
@@ -222,6 +333,10 @@ public class TestRMAuditLogger {
       if (callerContext.getSignature() != null) {
         expLog.append("\tCALLERSIGNATURE=signature");
       }
+    }
+    if (args != null) {
+      expLog.append("\tQUEUENAME=root");
+      expLog.append("\tRECURSIVE=true");
     }
     assertEquals(expLog.toString(), fLog);
   }
@@ -241,14 +356,18 @@ public class TestRMAuditLogger {
     testFailureLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID);
     
     testFailureLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID,
-        new CallerContext.Builder(null).setSignature(null).build());
+        new CallerContext.Builder(null).setSignature(null).build(), RESOURCE);
     testFailureLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID,
-        new CallerContext.Builder(CALLER_CONTEXT).setSignature(null).build());
+        new CallerContext.Builder(CALLER_CONTEXT).setSignature(null).build(), RESOURCE);
     testFailureLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID,
-        new CallerContext.Builder(null).setSignature(CALLER_SIGNATURE).build());
+        new CallerContext.Builder(null).setSignature(CALLER_SIGNATURE).build(), RESOURCE);
     testFailureLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID,
         new CallerContext.Builder(CALLER_CONTEXT).setSignature(CALLER_SIGNATURE)
-            .build());
+            .build(), RESOURCE);
+    RMAuditLogger.ArgsBuilder args = new RMAuditLogger.ArgsBuilder()
+        .append(Keys.QUEUENAME, QUEUE).append(Keys.RECURSIVE, "true");
+    testFailureLogFormatHelper(checkIP, null, null, null, null, null,
+        args);
   }
 
   /**

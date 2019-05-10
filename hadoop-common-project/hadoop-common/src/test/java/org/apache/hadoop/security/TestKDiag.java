@@ -67,7 +67,7 @@ public class TestKDiag extends Assert {
 
   @BeforeClass
   public static void startMiniKdc() throws Exception {
-    workDir = new File(System.getProperty("test.dir", "target"));
+    workDir = GenericTestUtils.getTestDir(TestKDiag.class.getSimpleName());
     securityProperties = MiniKdc.createConf();
     kdc = new MiniKdc(securityProperties, workDir);
     kdc.start();
@@ -162,6 +162,22 @@ public class TestKDiag extends Assert {
     kdiag(ARG_KEYLEN, KEYLEN,
         ARG_KEYTAB, keytab.getAbsolutePath(),
         ARG_PRINCIPAL, "foo@EXAMPLE.COM");
+  }
+
+  @Test
+  public void testKerberosName() throws Throwable {
+    kdiagFailure(ARG_KEYLEN, KEYLEN,
+            ARG_VERIFYSHORTNAME,
+            ARG_PRINCIPAL, "foo/foo/foo@BAR.COM");
+  }
+
+  @Test
+  public void testShortName() throws Throwable {
+    kdiag(ARG_KEYLEN, KEYLEN,
+            ARG_KEYTAB, keytab.getAbsolutePath(),
+            ARG_PRINCIPAL,
+            ARG_VERIFYSHORTNAME,
+            ARG_PRINCIPAL, "foo@EXAMPLE.COM");
   }
 
   @Test

@@ -19,31 +19,28 @@
   <parent>
     <artifactId>hadoop-yarn</artifactId>
     <groupId>org.apache.hadoop</groupId>
-    <version>3.0.0-SNAPSHOT</version>
+    <version>3.3.0-SNAPSHOT</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
-  <groupId>org.apache.hadoop</groupId>
   <artifactId>hadoop-yarn-api</artifactId>
-  <version>3.0.0-SNAPSHOT</version>
+  <version>3.3.0-SNAPSHOT</version>
   <name>Apache Hadoop YARN API</name>
 
   <properties>
     <!-- Needed for generating FindBugs warnings using parent pom -->
     <yarn.basedir>${project.parent.basedir}</yarn.basedir>
+    <should.run.jdiff>true</should.run.jdiff>
+    <dev-support.relative.dir>../dev-support</dev-support.relative.dir>
   </properties>
 
   <dependencies>
-    <dependency>
-      <groupId>commons-lang</groupId>
-      <artifactId>commons-lang</artifactId>
-    </dependency>
     <dependency>
       <groupId>com.google.guava</groupId>
       <artifactId>guava</artifactId>
     </dependency>
     <dependency>
-      <groupId>commons-logging</groupId>
-      <artifactId>commons-logging</artifactId>
+      <groupId>javax.xml.bind</groupId>
+      <artifactId>jaxb-api</artifactId>
     </dependency>
 
     <!-- 'mvn dependency:analyze' fails to detect use of this dependency -->
@@ -75,6 +72,31 @@
       <artifactId>junit</artifactId>
       <scope>test</scope>
     </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-api</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-engine</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.vintage</groupId>
+      <artifactId>junit-vintage-engine</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- Only required to run tests in an IDE that bundles an older version -->
+    <dependency>
+      <groupId>org.junit.platform</groupId>
+      <artifactId>junit-platform-launcher</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-annotations</artifactId>
+    </dependency>
   </dependencies>
 
   <build>
@@ -86,6 +108,12 @@
         </includes>
         <filtering>false</filtering>
       </resource>
+      <resource>
+        <directory>src/main/resources</directory>
+        <includes>
+          <include>**/jaxb.properties</include>
+        </includes>
+      </resource>
     </resources>
     <plugins>
       <plugin>
@@ -94,7 +122,6 @@
         <executions>
           <execution>
             <id>compile-protoc</id>
-            <phase>generate-sources</phase>
             <goals>
               <goal>protoc</goal>
             </goals>
@@ -120,9 +147,10 @@
                   <include>server/application_history_server.proto</include>
                   <include>client_SCM_protocol.proto</include>
                   <include>server/SCM_Admin_protocol.proto</include>
+                  <include>yarn_csi_adaptor.proto</include>
+                  <include>YarnCsiAdaptor.proto</include>
                 </includes>
               </source>
-              <output>${project.build.directory}/generated-sources/java</output>
             </configuration>
           </execution>
         </executions>

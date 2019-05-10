@@ -20,7 +20,7 @@ package org.apache.hadoop.yarn.server.nodemanager.webapp;
 
 import java.io.IOException;
 import java.io.PrintWriter;
-
+import java.util.List;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import javax.servlet.FilterChain;
@@ -38,6 +38,8 @@ import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.Ap
 import org.apache.hadoop.yarn.webapp.Controller.RequestContext;
 import com.google.inject.Injector;
 import com.sun.jersey.guice.spi.container.servlet.GuiceContainer;
+import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
+import org.apache.http.NameValuePair;
 
 @Singleton
 public class NMWebAppFilter extends GuiceContainer{
@@ -58,8 +60,7 @@ public class NMWebAppFilter extends GuiceContainer{
   public void doFilter(HttpServletRequest request,
       HttpServletResponse response, FilterChain chain) throws IOException,
       ServletException {
-    String uri = HtmlQuoting.quoteHtmlChars(request.getRequestURI());
-    String redirectPath = containerLogPageRedirectPath(uri);
+    String redirectPath = containerLogPageRedirectPath(request);
     if (redirectPath != null) {
       String redirectMsg =
           "Redirecting to log server" + " : " + redirectPath;
@@ -72,12 +73,17 @@ public class NMWebAppFilter extends GuiceContainer{
     super.doFilter(request, response, chain);
   }
 
-  private String containerLogPageRedirectPath(String uri) {
+  private String containerLogPageRedirectPath(HttpServletRequest request) {
+    String uri = HtmlQuoting.quoteHtmlChars(request.getRequestURI());
     String redirectPath = null;
     if (!uri.contains("/ws/v1/node") && uri.contains("/containerlogs")) {
       String[] parts = uri.split("/");
       String containerIdStr = parts[3];
       String appOwner = parts[4];
+      String logType = null;
+      if (parts.length > 5) {
+        logType = parts[5];
+      }
       if (containerIdStr != null && !containerIdStr.isEmpty()) {
         ContainerId containerId = null;
         try {
@@ -88,8 +94,24 @@ public class NMWebAppFilter extends GuiceContainer{
         ApplicationId appId =
             containerId.getApplicationAttemptId().getApplicationId();
         Application app = nmContext.getApplications().get(appId);
+
+        boolean fetchAggregatedLog = false;
+        List<NameValuePair> params = WebAppUtils.getURLEncodedQueryParam(
+            request);
+        if (params != null) {
+          for (NameValuePair param : params) {
+            if (param.getName().equals(ContainerLogsPage
+                .LOG_AGGREGATION_TYPE)) {
+              if (param.getValue().equals(ContainerLogsPage
+                  .LOG_AGGREGATION_REMOTE_TYPE)) {
+                fetchAggregatedLog = true;
+              }
+            }
+          }
+        }
+
         Configuration nmConf = nmContext.getLocalDirsHandler().getConfig();
-        if (app == null
+        if ((app == null || fetchAggregatedLog)
             && nmConf.getBoolean(YarnConfiguration.LOG_AGGREGATION_ENABLED,
               YarnConfiguration.DEFAULT_LOG_AGGREGATION_ENABLED)) {
           String logServerUrl =
@@ -105,7 +127,12 @@ public class NMWebAppFilter extends GuiceContainer{
             sb.append(containerIdStr);
             sb.append("/");
             sb.append(appOwner);
-            redirectPath = sb.toString();
+            if (logType != null && !logType.isEmpty()) {
+              sb.append("/");
+              sb.append(logType);
+            }
+            redirectPath =
+                WebAppUtils.appendQueryParams(request, sb.toString());
           } else {
             injector.getInstance(RequestContext.class).set(
               ContainerLogsPage.REDIRECT_URL, "false");

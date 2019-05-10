@@ -18,11 +18,11 @@
 
 package org.apache.hadoop.fs.contract;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.URI;
@@ -39,8 +39,8 @@ import java.net.URISyntaxException;
  */
 public abstract class AbstractBondedFSContract extends AbstractFSContract {
 
-  private static final Log LOG =
-      LogFactory.getLog(AbstractBondedFSContract.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(AbstractBondedFSContract.class);
 
   /**
    * Pattern for the option for test filesystems from schema
@@ -73,7 +73,8 @@ public abstract class AbstractBondedFSContract extends AbstractFSContract {
       } catch (URISyntaxException e) {
         throw new IOException("Invalid URI " + fsName);
       } catch (IllegalArgumentException e) {
-        throw new IOException("Invalid URI " + fsName, e);
+        throw new IOException("Unable to initialize filesystem " + fsName
+            + ": " + e, e);
       }
     } else {
       LOG.info("skipping tests as FS name is not defined in "

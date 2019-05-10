@@ -35,8 +35,8 @@ import org.apache.commons.cli.HelpFormatter;
 import org.apache.commons.cli.MissingArgumentException;
 import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
-import org.apache.commons.lang.StringUtils;
-import org.apache.commons.lang.time.DateFormatUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.time.DateFormatUtils;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.util.ToolRunner;
@@ -44,7 +44,6 @@ import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.NodeReport;
 import org.apache.hadoop.yarn.api.records.NodeState;
 import org.apache.hadoop.yarn.exceptions.YarnException;
-import org.apache.hadoop.yarn.util.ConverterUtils;
 
 @Private
 @Unstable
@@ -76,7 +75,8 @@ public class NodeCLI extends YarnCLI {
         "based on node state, all -all to list all nodes, " +
         "-showDetails to display more details about each node.");
     Option nodeStateOpt = new Option(NODE_STATE_CMD, true,
-        "Works with -list to filter nodes based on input comma-separated list of node states.");
+        "Works with -list to filter nodes based on input comma-separated " +
+        "list of node states. " + getAllValidNodeStates());
     nodeStateOpt.setValueSeparator(',');
     nodeStateOpt.setArgs(Option.UNLIMITED_VALUES);
     nodeStateOpt.setArgName("States");
@@ -89,6 +89,14 @@ public class NodeCLI extends YarnCLI {
     opts.addOption(showDetailsOpt);
     opts.getOption(STATUS_CMD).setArgName("NodeId");
 
+    if (args != null && args.length > 0) {
+      for (int i = args.length - 1; i >= 0; i--) {
+        if (args[i].equalsIgnoreCase("-" + NODE_ALL)) {
+          args[i] = "-" + NODE_ALL;
+        }
+      }
+    }
+
     int exitCode = -1;
     CommandLine cliParser = null;
     try {
@@ -98,6 +106,8 @@ public class NodeCLI extends YarnCLI {
       printUsage(opts);
       return exitCode;
     }
+
+    createAndStartYarnClient();
 
     if (cliParser.hasOption("status")) {
       if (args.length != 2) {
@@ -116,8 +126,15 @@ public class NodeCLI extends YarnCLI {
         if (types != null) {
           for (String type : types) {
             if (!type.trim().isEmpty()) {
-              nodeStates.add(NodeState.valueOf(
-                  org.apache.hadoop.util.StringUtils.toUpperCase(type.trim())));
+              try {
+                nodeStates.add(NodeState.valueOf(
+                    org.apache.hadoop.util.StringUtils.toUpperCase(
+                            type.trim())));
+              } catch (IllegalArgumentException ex) {
+                sysout.println("The node state " + type + " is invalid.");
+                sysout.println(getAllValidNodeStates());
+                return exitCode;
+              }
             }
           }
         }
@@ -243,7 +260,7 @@ public class NodeCLI extends YarnCLI {
    */
   private void printNodeStatus(String nodeIdStr) throws YarnException,
       IOException {
-    NodeId nodeId = ConverterUtils.toNodeId(nodeIdStr);
+    NodeId nodeId = NodeId.fromString(nodeIdStr);
     List<NodeReport> nodesReport = client.getNodeReports();
     // Use PrintWriter.println, which uses correct platform line ending.
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -275,9 +292,9 @@ public class NodeCLI extends YarnCLI {
       nodeReportStr.println(nodeReport.getNumContainers());
       nodeReportStr.print("\tMemory-Used : ");
       nodeReportStr.println((nodeReport.getUsed() == null) ? "0MB"
-          : (nodeReport.getUsed().getMemory() + "MB"));
+          : (nodeReport.getUsed().getMemorySize() + "MB"));
       nodeReportStr.print("\tMemory-Capacity : ");
-      nodeReportStr.println(nodeReport.getCapability().getMemory() + "MB");
+      nodeReportStr.println(nodeReport.getCapability().getMemorySize() + "MB");
       nodeReportStr.print("\tCPU-Used : ");
       nodeReportStr.println((nodeReport.getUsed() == null) ? "0 vcores"
           : (nodeReport.getUsed().getVirtualCores() + " vcores"));
@@ -290,6 +307,18 @@ public class NodeCLI extends YarnCLI {
           new ArrayList<String>(report.getNodeLabels());
       Collections.sort(nodeLabelsList);
       nodeReportStr.println(StringUtils.join(nodeLabelsList.iterator(), ','));
+
+      if (nodeReport.getNodeAttributes().size() > 0) {
+        ArrayList nodeAtrs = new ArrayList<>(nodeReport.getNodeAttributes());
+        nodeReportStr.print("\tNode Attributes : ");
+        nodeReportStr.println(nodeAtrs.get(0).toString());
+        for (int index = 1; index < nodeAtrs.size(); index++) {
+          nodeReportStr.println(
+              String.format("\t%18s%s", "", nodeAtrs.get(index).toString()));
+        }
+      } else {
+        nodeReportStr.println("\tNode Attributes : ");
+      }
 
       nodeReportStr.print("\tResource Utilization by Node : ");
       if (nodeReport.getNodeUtilization() != null) {
@@ -319,5 +348,15 @@ public class NodeCLI extends YarnCLI {
     }
     nodeReportStr.close();
     sysout.println(baos.toString("UTF-8"));
+  }
+
+  private String getAllValidNodeStates() {
+    StringBuilder sb = new StringBuilder();
+    sb.append("The valid node state can be one of the following: ");
+    for (NodeState state : NodeState.values()) {
+      sb.append(state).append(",");
+    }
+    String output = sb.toString();
+    return output.substring(0, output.length() - 1) + ".";
   }
 }

@@ -34,6 +34,7 @@ import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.BlockUCState;
+import org.apache.hadoop.hdfs.server.namenode.FSDirectory.DirOp;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem.RecoverLeaseOp;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeLayoutVersion.Feature;
 import org.apache.hadoop.ipc.RetriableException;
@@ -82,15 +83,12 @@ final class FSDirAppendOp {
       final boolean logRetryCache) throws IOException {
     assert fsn.hasWriteLock();
 
-    final byte[][] pathComponents = FSDirectory
-        .getPathComponentsForReservedPath(srcArg);
     final LocatedBlock lb;
     final FSDirectory fsd = fsn.getFSDirectory();
-    final String src;
+    final INodesInPath iip;
     fsd.writeLock();
     try {
-      src = fsd.resolvePath(pc, srcArg, pathComponents);
-      final INodesInPath iip = fsd.getINodesInPath4Write(src);
+      iip = fsd.resolvePath(pc, srcArg, DirOp.WRITE);
       // Verify that the destination does not exist as a directory already
       final INode inode = iip.getLastINode();
       final String path = iip.getPath();
@@ -108,12 +106,6 @@ final class FSDirAppendOp {
                 + clientMachine);
       }
       final INodeFile file = INodeFile.valueOf(inode, path, true);
-
-      // not support appending file with striped blocks
-      if (file.isStriped()) {
-        throw new UnsupportedOperationException(
-            "Cannot append to files with striped block " + src);
-      }
 
       BlockManager blockManager = fsd.getBlockManager();
       final BlockStoragePolicy lpPolicy = blockManager
@@ -150,8 +142,8 @@ final class FSDirAppendOp {
       fsd.writeUnlock();
     }
 
-    HdfsFileStatus stat = FSDirStatAndListingOp.getFileInfo(fsd, src, false,
-        FSDirectory.isReservedRawName(srcArg));
+    HdfsFileStatus stat =
+        FSDirStatAndListingOp.getFileInfo(fsd, iip, false, false);
     if (lb != null) {
       NameNode.stateChangeLog.debug(
           "DIR* NameSystem.appendFile: file {} for {} at {} block {} block"
@@ -194,6 +186,10 @@ final class FSDirAppendOp {
 
     LocatedBlock ret = null;
     if (!newBlock) {
+      if (file.isStriped()) {
+        throw new UnsupportedOperationException(
+            "Append on EC file without new block is not supported.");
+      }
       FSDirectory fsd = fsn.getFSDirectory();
       ret = fsd.getBlockManager().convertLastBlockToUnderConstruction(file, 0);
       if (ret != null && delta != null) {

@@ -25,8 +25,6 @@ import java.io.PrintWriter;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.nio.charset.Charset;
-import java.util.List;
 import java.util.Random;
 import java.util.Set;
 
@@ -39,6 +37,7 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.http.HtmlQuoting;
+import org.apache.hadoop.http.IsActiveServlet;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
@@ -50,8 +49,6 @@ import org.apache.hadoop.yarn.util.Apps;
 import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.hadoop.yarn.webapp.YarnWebParams;
 import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
-import org.apache.http.NameValuePair;
-import org.apache.http.client.utils.URLEncodedUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -72,7 +69,7 @@ public class RMWebAppFilter extends GuiceContainer {
 
   // define a set of URIs which do not need to do redirection
   private static final Set<String> NON_REDIRECTED_URIS = Sets.newHashSet(
-      "/conf", "/stacks", "/logLevel", "/logs");
+      "/conf", "/stacks", "/logLevel", "/logs", IsActiveServlet.PATH_SPEC);
   private String path;
   private boolean ahsEnabled;
   private String ahsPageURLPrefix;
@@ -116,22 +113,10 @@ public class RMWebAppFilter extends GuiceContainer {
       htmlEscapedUri = "/";
     }
 
-    String uriWithQueryString = htmlEscapedUri;
-    String htmlEscapedUriWithQueryString = htmlEscapedUri;
-
-    String queryString = request.getQueryString();
-    if (queryString != null && !queryString.isEmpty()) {
-      String reqEncoding = request.getCharacterEncoding();
-      if (reqEncoding == null || reqEncoding.isEmpty()) {
-        reqEncoding = "ISO-8859-1";
-      }
-      Charset encoding = Charset.forName(reqEncoding);
-      List<NameValuePair> params = URLEncodedUtils.parse(queryString, encoding);
-      String urlEncodedQueryString = URLEncodedUtils.format(params, encoding);
-      uriWithQueryString += "?" + urlEncodedQueryString;
-      htmlEscapedUriWithQueryString = HtmlQuoting.quoteHtmlChars(
-          request.getRequestURI() + "?" + urlEncodedQueryString);
-    }
+    String uriWithQueryString =
+        WebAppUtils.appendQueryParams(request, htmlEscapedUri);
+    String htmlEscapedUriWithQueryString =
+        WebAppUtils.getHtmlEscapedURIWithQueryString(request);
 
     RMWebApp rmWebApp = injector.getInstance(RMWebApp.class);
     rmWebApp.checkIfStandbyRM();
@@ -220,7 +205,7 @@ public class RMWebAppFilter extends GuiceContainer {
           break;
         case "appattempt":
           try{
-            appAttemptId = ConverterUtils.toApplicationAttemptId(parts[3]);
+            appAttemptId = ApplicationAttemptId.fromString(parts[3]);
           } catch (IllegalArgumentException e) {
             LOG.debug("Error parsing {} as an ApplicationAttemptId",
                 parts[3], e);

@@ -24,8 +24,6 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.util.EnumSet;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileContext;
 import org.apache.hadoop.fs.FileSystem;
@@ -101,6 +99,8 @@ import org.apache.hadoop.yarn.state.StateMachineFactory;
 import org.apache.hadoop.yarn.util.Clock;
 import org.apache.hadoop.yarn.util.SystemClock;
 import org.junit.Assert;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 /**
@@ -109,7 +109,7 @@ import org.junit.Assert;
  */
 @SuppressWarnings("unchecked")
 public class MRApp extends MRAppMaster {
-  private static final Log LOG = LogFactory.getLog(MRApp.class);
+  private static final Logger LOG = LoggerFactory.getLogger(MRApp.class);
 
   /**
    * The available resource of each container allocated.
@@ -254,7 +254,7 @@ public class MRApp extends MRAppMaster {
     // the job can reaches the final state when MRAppMaster shuts down.
     this.successfullyUnregistered.set(unregistered);
     this.assignedQueue = assignedQueue;
-    this.resource = Resource.newInstance(1234, 2);
+    this.resource = Resource.newInstance(1234L, 2);
   }
 
   @Override
@@ -814,20 +814,6 @@ public class MRApp extends MRAppMaster {
                 containerToken.getKind()),
             new Text(containerToken.getService()));
     return token.decodeIdentifier();
-  }
-
-  @Override
-  protected void shutdownTaskLog() {
-    // Avoid closing the logging system during unit tests,
-    // otherwise subsequent MRApp instances in the same test
-    // will fail to log anything.
-  }
-
-  @Override
-  protected void shutdownLogManager() {
-    // Avoid closing the logging system during unit tests,
-    // otherwise subsequent MRApp instances in the same test
-    // will fail to log anything.
   }
 
 }

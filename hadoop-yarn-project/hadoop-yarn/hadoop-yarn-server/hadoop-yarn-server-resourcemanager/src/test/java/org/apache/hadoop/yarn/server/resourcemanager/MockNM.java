@@ -24,13 +24,17 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.Container;
+import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerState;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
+import org.apache.hadoop.yarn.api.records.NodeLabel;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.server.api.protocolrecords.NMContainerStatus;
@@ -38,25 +42,33 @@ import org.apache.hadoop.yarn.server.api.protocolrecords.NodeHeartbeatRequest;
 import org.apache.hadoop.yarn.server.api.protocolrecords.NodeHeartbeatResponse;
 import org.apache.hadoop.yarn.server.api.protocolrecords.RegisterNodeManagerRequest;
 import org.apache.hadoop.yarn.server.api.protocolrecords.RegisterNodeManagerResponse;
+import org.apache.hadoop.yarn.server.api.records.AppCollectorData;
+import org.apache.hadoop.yarn.server.api.protocolrecords.UnRegisterNodeManagerRequest;
 import org.apache.hadoop.yarn.server.api.records.MasterKey;
 import org.apache.hadoop.yarn.server.api.records.NodeHealthStatus;
 import org.apache.hadoop.yarn.server.api.records.NodeStatus;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.util.Records;
 import org.apache.hadoop.yarn.util.YarnVersionInfo;
-import org.mortbay.log.Log;
+import org.apache.hadoop.yarn.util.resource.Resources;
+import org.eclipse.jetty.util.log.Log;
 
 public class MockNM {
 
   private int responseId;
   private NodeId nodeId;
-  private final int memory;
-  private final int vCores;
+  private Resource capability;
   private ResourceTrackerService resourceTracker;
   private int httpPort = 2;
   private MasterKey currentContainerTokenMasterKey;
   private MasterKey currentNMTokenMasterKey;
   private String version;
+  private Map<ContainerId, ContainerStatus> containerStats =
+      new HashMap<ContainerId, ContainerStatus>();
+  private Map<ApplicationId, AppCollectorData> registeringCollectors
+      = new ConcurrentHashMap<>();
+  private Set<NodeLabel> nodeLabels;
+  private long tokenSequenceNo;
 
   public MockNM(String nodeIdStr, int memory, ResourceTrackerService resourceTracker) {
     // scale vcores based on the requested memory
@@ -68,17 +80,36 @@ public class MockNM {
 
   public MockNM(String nodeIdStr, int memory, int vcores,
       ResourceTrackerService resourceTracker) {
-    this(nodeIdStr, memory, vcores, resourceTracker, YarnVersionInfo.getVersion());
+    this(nodeIdStr, memory, vcores, resourceTracker,
+        YarnVersionInfo.getVersion());
   }
 
   public MockNM(String nodeIdStr, int memory, int vcores,
       ResourceTrackerService resourceTracker, String version) {
-    this.memory = memory;
-    this.vCores = vcores;
+    this(nodeIdStr, Resource.newInstance(memory, vcores), resourceTracker,
+        version);
+  }
+
+  public MockNM(String nodeIdStr, Resource capability,
+      ResourceTrackerService resourceTracker) {
+    this(nodeIdStr, capability, resourceTracker,
+        YarnVersionInfo.getVersion());
+  }
+
+  public MockNM(String nodeIdStr, Resource capability,
+      ResourceTrackerService resourceTracker, String version) {
+    this.capability = capability;
     this.resourceTracker = resourceTracker;
     this.version = version;
     String[] splits = nodeIdStr.split(":");
     nodeId = BuilderUtils.newNodeId(splits[0], Integer.parseInt(splits[1]));
+  }
+
+  public MockNM(String nodeIdStr, Resource capability,
+      ResourceTrackerService resourceTracker, String version, Set<NodeLabel>
+      nodeLabels) {
+    this(nodeIdStr, capability, resourceTracker, version);
+    this.nodeLabels = nodeLabels;
   }
 
   public NodeId getNodeId() {
@@ -106,14 +137,28 @@ public class MockNM {
   }
 
   public void containerIncreaseStatus(Container container) throws Exception {
-    Map<ApplicationId, List<ContainerStatus>> conts = new HashMap<>();
     ContainerStatus containerStatus = BuilderUtils.newContainerStatus(
         container.getId(), ContainerState.RUNNING, "Success", 0,
             container.getResource());
-    conts.put(container.getId().getApplicationAttemptId().getApplicationId(),
-        Collections.singletonList(containerStatus));
     List<Container> increasedConts = Collections.singletonList(container);
-    nodeHeartbeat(conts, increasedConts, true, ++responseId);
+    nodeHeartbeat(Collections.singletonList(containerStatus), increasedConts,
+        true, responseId);
+  }
+
+  public void addRegisteringCollector(ApplicationId appId,
+      AppCollectorData data) {
+    this.registeringCollectors.put(appId, data);
+  }
+
+  public Map<ApplicationId, AppCollectorData> getRegisteringCollectors() {
+    return this.registeringCollectors;
+  }
+
+  public void unRegisterNode() throws Exception {
+    UnRegisterNodeManagerRequest request = Records
+        .newRecord(UnRegisterNodeManagerRequest.class);
+    request.setNodeId(nodeId);
+    resourceTracker.unRegisterNodeManager(request);
   }
 
   public RegisterNodeManagerResponse registerNode() throws Exception {
@@ -130,61 +175,98 @@ public class MockNM {
       List<ApplicationId> runningApplications) throws Exception {
     RegisterNodeManagerRequest req = Records.newRecord(
         RegisterNodeManagerRequest.class);
+
     req.setNodeId(nodeId);
     req.setHttpPort(httpPort);
-    Resource resource = BuilderUtils.newResource(memory, vCores);
-    req.setResource(resource);
+    req.setResource(capability);
     req.setContainerStatuses(containerReports);
     req.setNMVersion(version);
     req.setRunningApplications(runningApplications);
+    if ( nodeLabels != null && nodeLabels.size() > 0) {
+      req.setNodeLabels(nodeLabels);
+    }
+
     RegisterNodeManagerResponse registrationResponse =
         resourceTracker.registerNodeManager(req);
     this.currentContainerTokenMasterKey =
         registrationResponse.getContainerTokenMasterKey();
     this.currentNMTokenMasterKey = registrationResponse.getNMTokenMasterKey();
-    return registrationResponse;    
+    Resource newResource = registrationResponse.getResource();
+    if (newResource != null) {
+      capability = Resources.clone(newResource);
+    }
+    containerStats.clear();
+    if (containerReports != null) {
+      for (NMContainerStatus report : containerReports) {
+        if (report.getContainerState() != ContainerState.COMPLETE) {
+          containerStats.put(report.getContainerId(),
+              ContainerStatus.newInstance(report.getContainerId(),
+                  report.getContainerState(), report.getDiagnostics(),
+                  report.getContainerExitStatus()));
+        }
+      }
+    }
+    responseId = 0;
+    return registrationResponse;
   }
-  
+
   public NodeHeartbeatResponse nodeHeartbeat(boolean isHealthy) throws Exception {
-    return nodeHeartbeat(new HashMap<ApplicationId, List<ContainerStatus>>(),
-        isHealthy, ++responseId);
+    return nodeHeartbeat(Collections.<ContainerStatus>emptyList(),
+        Collections.<Container>emptyList(), isHealthy, responseId);
   }
 
   public NodeHeartbeatResponse nodeHeartbeat(ApplicationAttemptId attemptId,
       long containerId, ContainerState containerState) throws Exception {
-    HashMap<ApplicationId, List<ContainerStatus>> nodeUpdate =
-        new HashMap<ApplicationId, List<ContainerStatus>>(1);
     ContainerStatus containerStatus = BuilderUtils.newContainerStatus(
         BuilderUtils.newContainerId(attemptId, containerId), containerState,
-        "Success", 0, BuilderUtils.newResource(memory, vCores));
+        "Success", 0, capability);
     ArrayList<ContainerStatus> containerStatusList =
         new ArrayList<ContainerStatus>(1);
     containerStatusList.add(containerStatus);
-    Log.info("ContainerStatus: " + containerStatus);
-    nodeUpdate.put(attemptId.getApplicationId(), containerStatusList);
-    return nodeHeartbeat(nodeUpdate, true);
+    Log.getLog().info("ContainerStatus: " + containerStatus);
+    return nodeHeartbeat(containerStatusList,
+        Collections.<Container>emptyList(), true, responseId);
   }
 
   public NodeHeartbeatResponse nodeHeartbeat(Map<ApplicationId,
       List<ContainerStatus>> conts, boolean isHealthy) throws Exception {
-    return nodeHeartbeat(conts, isHealthy, ++responseId);
+    return nodeHeartbeat(conts, isHealthy, responseId);
   }
 
   public NodeHeartbeatResponse nodeHeartbeat(Map<ApplicationId,
       List<ContainerStatus>> conts, boolean isHealthy, int resId) throws Exception {
-    return nodeHeartbeat(conts, new ArrayList<Container>(), isHealthy, resId);
+    ArrayList<ContainerStatus> updatedStats = new ArrayList<ContainerStatus>();
+    for (List<ContainerStatus> stats : conts.values()) {
+      updatedStats.addAll(stats);
+    }
+    return nodeHeartbeat(updatedStats, Collections.<Container>emptyList(),
+        isHealthy, resId);
   }
 
-  public NodeHeartbeatResponse nodeHeartbeat(Map<ApplicationId,
-      List<ContainerStatus>> conts, List<Container> increasedConts,
-          boolean isHealthy, int resId) throws Exception {
+  public NodeHeartbeatResponse nodeHeartbeat(
+      List<ContainerStatus> updatedStats, boolean isHealthy) throws Exception {
+    return nodeHeartbeat(updatedStats, Collections.<Container>emptyList(),
+        isHealthy, responseId);
+  }
+
+  public NodeHeartbeatResponse nodeHeartbeat(List<ContainerStatus> updatedStats,
+      List<Container> increasedConts, boolean isHealthy, int resId)
+          throws Exception {
     NodeHeartbeatRequest req = Records.newRecord(NodeHeartbeatRequest.class);
     NodeStatus status = Records.newRecord(NodeStatus.class);
     status.setResponseId(resId);
     status.setNodeId(nodeId);
-    for (Map.Entry<ApplicationId, List<ContainerStatus>> entry : conts.entrySet()) {
-      Log.info("entry.getValue() " + entry.getValue());
-      status.setContainersStatuses(entry.getValue());
+    ArrayList<ContainerId> completedContainers = new ArrayList<ContainerId>();
+    for (ContainerStatus stat : updatedStats) {
+      if (stat.getState() == ContainerState.COMPLETE) {
+        completedContainers.add(stat.getContainerId());
+      }
+      containerStats.put(stat.getContainerId(), stat);
+    }
+    status.setContainersStatuses(
+        new ArrayList<ContainerStatus>(containerStats.values()));
+    for (ContainerId cid : completedContainers) {
+      containerStats.remove(cid);
     }
     status.setIncreasedContainers(increasedConts);
     NodeHealthStatus healthStatus = Records.newRecord(NodeHealthStatus.class);
@@ -195,9 +277,14 @@ public class MockNM {
     req.setNodeStatus(status);
     req.setLastKnownContainerTokenMasterKey(this.currentContainerTokenMasterKey);
     req.setLastKnownNMTokenMasterKey(this.currentNMTokenMasterKey);
+
+    req.setRegisteringCollectors(this.registeringCollectors);
+    req.setTokenSequenceNo(this.tokenSequenceNo);
+
     NodeHeartbeatResponse heartbeatResponse =
         resourceTracker.nodeHeartbeat(req);
-    
+    responseId = heartbeatResponse.getResponseId();
+
     MasterKey masterKeyFromRM = heartbeatResponse.getContainerTokenMasterKey();
     if (masterKeyFromRM != null
         && masterKeyFromRM.getKeyId() != this.currentContainerTokenMasterKey
@@ -211,15 +298,33 @@ public class MockNM {
             .getKeyId()) {
       this.currentNMTokenMasterKey = masterKeyFromRM;
     }
-    
+
+    Resource newResource = heartbeatResponse.getResource();
+    if (newResource != null) {
+      capability = Resources.clone(newResource);
+    }
+
+    this.tokenSequenceNo = heartbeatResponse.getTokenSequenceNo();
     return heartbeatResponse;
   }
 
-  public int getMemory() {
-    return memory;
+  public long getMemory() {
+    return capability.getMemorySize();
   }
 
   public int getvCores() {
-    return vCores;
+    return capability.getVirtualCores();
+  }
+
+  public Resource getCapability() {
+    return capability;
+  }
+
+  public String getVersion() {
+    return version;
+  }
+
+  public void setResponseId(int id) {
+    this.responseId = id;
   }
 }

@@ -23,12 +23,10 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtilClient.CorruptedBlocks;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
-import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
-import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.server.datanode.CachingStrategy;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
-import org.apache.hadoop.hdfs.server.protocol.BlockECReconstructionCommand.BlockECReconstructionInfo;
 import org.apache.hadoop.hdfs.util.StripedBlockUtil;
+import org.apache.hadoop.hdfs.util.StripedBlockUtil.BlockReadStats;
 import org.apache.hadoop.hdfs.util.StripedBlockUtil.StripingChunkReadResult;
 import org.apache.hadoop.util.DataChecksum;
 import org.slf4j.Logger;
@@ -71,6 +69,8 @@ class StripedReader {
   private int[] successList;
 
   private final int minRequiredSources;
+  // the number of xmits used by the re-construction task.
+  private final int xmits;
   // The buffers and indices for striped blocks whose length is 0
   private ByteBuffer[] zeroStripeBuffers;
   private short[] zeroStripeIndices;
@@ -81,12 +81,11 @@ class StripedReader {
 
   private final List<StripedBlockReader> readers;
 
-  private final Map<Future<Void>, Integer> futures = new HashMap<>();
-  private final CompletionService<Void> readService;
+  private final Map<Future<BlockReadStats>, Integer> futures = new HashMap<>();
+  private final CompletionService<BlockReadStats> readService;
 
   StripedReader(StripedReconstructor reconstructor, DataNode datanode,
-                Configuration conf,
-                BlockECReconstructionInfo reconstructionInfo) {
+      Configuration conf, StripedReconstructionInfo stripedReconInfo) {
     stripedReadTimeoutInMills = conf.getInt(
         DFSConfigKeys.DFS_DN_EC_RECONSTRUCTION_STRIPED_READ_TIMEOUT_MILLIS_KEY,
         DFSConfigKeys.DFS_DN_EC_RECONSTRUCTION_STRIPED_READ_TIMEOUT_MILLIS_DEFAULT);
@@ -98,13 +97,11 @@ class StripedReader {
     this.datanode = datanode;
     this.conf = conf;
 
-    ErasureCodingPolicy ecPolicy = reconstructionInfo.getErasureCodingPolicy();
-    dataBlkNum = ecPolicy.getNumDataUnits();
-    parityBlkNum = ecPolicy.getNumParityUnits();
+    dataBlkNum = stripedReconInfo.getEcPolicy().getNumDataUnits();
+    parityBlkNum = stripedReconInfo.getEcPolicy().getNumParityUnits();
 
-    ExtendedBlock blockGroup = reconstructionInfo.getExtendedBlock();
-    int cellsNum = (int)((blockGroup.getNumBytes() - 1) / ecPolicy.getCellSize()
-        + 1);
+    int cellsNum = (int) ((stripedReconInfo.getBlockGroup().getNumBytes() - 1)
+        / stripedReconInfo.getEcPolicy().getCellSize() + 1);
     minRequiredSources = Math.min(cellsNum, dataBlkNum);
 
     if (minRequiredSources < dataBlkNum) {
@@ -113,8 +110,16 @@ class StripedReader {
       zeroStripeIndices = new short[zeroStripNum];
     }
 
-    liveIndices = reconstructionInfo.getLiveBlockIndices();
-    sources = reconstructionInfo.getSourceDnInfos();
+    // It is calculated by the maximum number of connections from either sources
+    // or targets.
+    xmits = Math.max(minRequiredSources,
+        stripedReconInfo.getTargets() != null ?
+        stripedReconInfo.getTargets().length : 0);
+
+    this.liveIndices = stripedReconInfo.getLiveIndices();
+    assert liveIndices != null;
+    this.sources = stripedReconInfo.getSources();
+    assert sources != null;
 
     readers = new ArrayList<>(sources.length);
     readService = reconstructor.createReadService();
@@ -184,7 +189,7 @@ class StripedReader {
   }
 
   protected ByteBuffer allocateReadBuffer() {
-    return ByteBuffer.allocate(getBufferSize());
+    return reconstructor.allocateBuffer(getBufferSize());
   }
 
   private void initZeroStrip() {
@@ -285,9 +290,9 @@ class StripedReader {
       int toRead = getReadLength(liveIndices[successList[i]],
           reconstructLength);
       if (toRead > 0) {
-        Callable<Void> readCallable =
+        Callable<BlockReadStats> readCallable =
             reader.readFromBlock(toRead, corruptedBlocks);
-        Future<Void> f = readService.submit(readCallable);
+        Future<BlockReadStats> f = readService.submit(readCallable);
         futures.put(f, successList[i]);
       } else {
         // If the read length is 0, we don't need to do real read
@@ -407,9 +412,9 @@ class StripedReader {
 
     // step3: schedule if find a correct source DN and need to do real read.
     if (reader != null) {
-      Callable<Void> readCallable =
+      Callable<BlockReadStats> readCallable =
           reader.readFromBlock(toRead, corruptedBlocks);
-      Future<Void> f = readService.submit(readCallable);
+      Future<BlockReadStats> f = readService.submit(readCallable);
       futures.put(f, m);
       used.set(m);
     }
@@ -418,16 +423,29 @@ class StripedReader {
   }
 
   // Cancel all reads.
-  private static void cancelReads(Collection<Future<Void>> futures) {
-    for (Future<Void> future : futures) {
+  private static void cancelReads(Collection<Future<BlockReadStats>> futures) {
+    for (Future<BlockReadStats> future : futures) {
       future.cancel(true);
     }
   }
 
   void close() {
+    if (zeroStripeBuffers != null) {
+      for (ByteBuffer zeroStripeBuffer : zeroStripeBuffers) {
+        reconstructor.freeBuffer(zeroStripeBuffer);
+      }
+    }
+    zeroStripeBuffers = null;
+
     for (StripedBlockReader reader : readers) {
+      reconstructor.freeBuffer(reader.getReadBuffer());
+      reader.freeReadBuffer();
       reader.closeBlockReader();
     }
+  }
+
+  StripedReconstructor getReconstructor() {
+    return reconstructor;
   }
 
   StripedBlockReader getReader(int i) {
@@ -462,5 +480,17 @@ class StripedReader {
 
   CachingStrategy getCachingStrategy() {
     return reconstructor.getCachingStrategy();
+  }
+
+  /**
+   * Return the xmits of this EC reconstruction task.
+   * <p>
+   * DN uses it to coordinate with NN to adjust the speed of scheduling the
+   * EC reconstruction tasks to this DN.
+   *
+   * @return the xmits of this reconstruction task.
+   */
+  int getXmits() {
+    return xmits;
   }
 }

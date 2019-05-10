@@ -17,8 +17,6 @@
  */
 package org.apache.hadoop.mapreduce;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.LocatedFileStatus;
@@ -33,6 +31,8 @@ import org.apache.hadoop.util.ToolRunner;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
@@ -60,7 +60,8 @@ import static org.junit.Assert.fail;
  */
 public class TestMRJobClient extends ClusterMapReduceTestCase {
 
-  private static final Log LOG = LogFactory.getLog(TestMRJobClient.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestMRJobClient.class);
 
   private Job runJob(Configuration conf) throws Exception {
     String input = "hello1\nhello2\nhello3\n";
@@ -168,6 +169,8 @@ public class TestMRJobClient extends ClusterMapReduceTestCase {
     testfailTask(conf);
     // kill job
     testKillJob(conf);
+    // download job config
+    testConfig(jobId, conf);
   }
 
   /**
@@ -532,6 +535,32 @@ public class TestMRJobClient extends ClusterMapReduceTestCase {
     JSONObject json = new JSONObject(line);
     assertEquals(jobId, json.getString("hadoopJob"));
     assertEquals(0, out.size());
+  }
+
+  /**
+   * download job config
+   */
+  private void testConfig(String jobId, Configuration conf) throws Exception {
+    CLI jc = createJobClient();
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+    // bad arguments
+    int exitCode = runTool(conf, jc, new String[] { "-config" }, out);
+    assertEquals("Exit code", -1, exitCode);
+    exitCode = runTool(conf, jc, new String[] { "-config job_invalid foo.xml" },
+        out);
+    assertEquals("Exit code", -1, exitCode);
+
+    // good arguments
+    File outFile = File.createTempFile("config", ".xml");
+    exitCode = runTool(conf, jc, new String[] { "-config", jobId,
+        outFile.toString()}, out);
+    assertEquals("Exit code", 0, exitCode);
+    BufferedReader br = new BufferedReader(new FileReader(outFile));
+    String line = br.readLine();
+    br.close();
+    assertEquals("<?xml version=\"1.0\" encoding=\"UTF-8\" " +
+        "standalone=\"no\"?><configuration>", line);
   }
 
   /**

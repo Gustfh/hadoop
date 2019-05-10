@@ -17,9 +17,14 @@
  */
 package org.apache.hadoop.mapreduce.jobhistory;
 
+import java.util.Set;
+
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.mapreduce.TaskType;
+import org.apache.hadoop.util.StringUtils;
+import org.apache.hadoop.yarn.api.records.timelineservice.TimelineEvent;
+import org.apache.hadoop.yarn.api.records.timelineservice.TimelineMetric;
 
 /**
  * Event to record the normalized map/reduce requirements.
@@ -28,7 +33,7 @@ import org.apache.hadoop.mapreduce.TaskType;
 @InterfaceAudience.Private
 @InterfaceStability.Unstable
 public class NormalizedResourceEvent implements HistoryEvent {
-  private int memory;
+  private long memory;
   private TaskType taskType;
   
   /**
@@ -36,7 +41,7 @@ public class NormalizedResourceEvent implements HistoryEvent {
    * @param taskType the tasktype of the request.
    * @param memory the normalized memory requirements.
    */
-  public NormalizedResourceEvent(TaskType taskType, int memory) {
+  public NormalizedResourceEvent(TaskType taskType, long memory) {
     this.memory = memory;
     this.taskType = taskType;
   }
@@ -53,7 +58,7 @@ public class NormalizedResourceEvent implements HistoryEvent {
    * the normalized memory
    * @return the normalized memory
    */
-  public int getMemory() {
+  public long getMemory() {
     return this.memory;
   }
   
@@ -70,5 +75,19 @@ public class NormalizedResourceEvent implements HistoryEvent {
   @Override
   public void setDatum(Object datum) {
     throw new UnsupportedOperationException("Not a seriable object");
+  }
+
+  @Override
+  public TimelineEvent toTimelineEvent() {
+    TimelineEvent tEvent = new TimelineEvent();
+    tEvent.setId(StringUtils.toUpperCase(getEventType().name()));
+    tEvent.addInfo("MEMORY", "" + getMemory());
+    tEvent.addInfo("TASK_TYPE", getTaskType());
+    return tEvent;
+  }
+
+  @Override
+  public Set<TimelineMetric> getTimelineMetrics() {
+    return null;
   }
 }

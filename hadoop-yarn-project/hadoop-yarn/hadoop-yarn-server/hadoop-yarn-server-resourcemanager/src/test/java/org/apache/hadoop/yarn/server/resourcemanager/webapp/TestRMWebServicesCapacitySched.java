@@ -29,6 +29,7 @@ import javax.ws.rs.core.MediaType;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 
+import org.apache.hadoop.http.JettyUtils;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.server.resourcemanager.MockRM;
@@ -38,6 +39,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.Capacity
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacitySchedulerConfiguration;
 import org.apache.hadoop.yarn.util.resource.Resources;
 import org.apache.hadoop.yarn.webapp.GenericExceptionHandler;
+import org.apache.hadoop.yarn.webapp.GuiceServletConfig;
 import org.apache.hadoop.yarn.webapp.JerseyTestBase;
 import org.apache.hadoop.yarn.webapp.WebServicesTestUtils;
 import org.codehaus.jettison.json.JSONArray;
@@ -53,8 +55,6 @@ import org.w3c.dom.NodeList;
 import org.xml.sax.InputSource;
 
 import com.google.inject.Guice;
-import com.google.inject.Injector;
-import com.google.inject.servlet.GuiceServletContextListener;
 import com.google.inject.servlet.ServletModule;
 import com.sun.jersey.api.client.ClientResponse;
 import com.sun.jersey.api.client.WebResource;
@@ -63,9 +63,9 @@ import com.sun.jersey.test.framework.WebAppDescriptor;
 
 public class TestRMWebServicesCapacitySched extends JerseyTestBase {
 
-  private static MockRM rm;
-  private CapacitySchedulerConfiguration csConf;
-  private YarnConfiguration conf;
+  protected static MockRM rm;
+  protected static CapacitySchedulerConfiguration csConf;
+  protected static YarnConfiguration conf;
 
   private class QueueInfo {
     float capacity;
@@ -89,7 +89,7 @@ public class TestRMWebServicesCapacitySched extends JerseyTestBase {
     float userLimitFactor;
   }
 
-  private Injector injector = Guice.createInjector(new ServletModule() {
+  private static class WebServletModule extends ServletModule {
     @Override
     protected void configureServlets() {
       bind(JAXBContextResolver.class);
@@ -100,66 +100,68 @@ public class TestRMWebServicesCapacitySched extends JerseyTestBase {
       conf = new YarnConfiguration(csConf);
       conf.setClass(YarnConfiguration.RM_SCHEDULER, CapacityScheduler.class,
 		    ResourceScheduler.class);
+      conf.set(YarnConfiguration.RM_PLACEMENT_CONSTRAINTS_HANDLER,
+          YarnConfiguration.SCHEDULER_RM_PLACEMENT_CONSTRAINTS_HANDLER);
       rm = new MockRM(conf);
       bind(ResourceManager.class).toInstance(rm);
       serve("/*").with(GuiceContainer.class);
     }
-  });
+  }
 
-  public class GuiceServletConfig extends GuiceServletContextListener {
-
-    @Override
-    protected Injector getInjector() {
-      return injector;
-    }
+  static {
+    GuiceServletConfig.setInjector(
+        Guice.createInjector(new WebServletModule()));
   }
 
   private static void setupQueueConfiguration(
-      CapacitySchedulerConfiguration conf) {
+      CapacitySchedulerConfiguration config) {
 
     // Define top-level queues
-    conf.setQueues(CapacitySchedulerConfiguration.ROOT, new String[] { "a", "b" });
+    config.setQueues(CapacitySchedulerConfiguration.ROOT,
+        new String[] {"a", "b"});
 
     final String A = CapacitySchedulerConfiguration.ROOT + ".a";
-    conf.setCapacity(A, 10.5f);
-    conf.setMaximumCapacity(A, 50);
+    config.setCapacity(A, 10.5f);
+    config.setMaximumCapacity(A, 50);
 
     final String B = CapacitySchedulerConfiguration.ROOT + ".b";
-    conf.setCapacity(B, 89.5f);
+    config.setCapacity(B, 89.5f);
 
     // Define 2nd-level queues
     final String A1 = A + ".a1";
     final String A2 = A + ".a2";
-    conf.setQueues(A, new String[] { "a1", "a2" });
-    conf.setCapacity(A1, 30);
-    conf.setMaximumCapacity(A1, 50);
+    config.setQueues(A, new String[] {"a1", "a2"});
+    config.setCapacity(A1, 30);
+    config.setMaximumCapacity(A1, 50);
 
-    conf.setUserLimitFactor(A1, 100.0f);
-    conf.setCapacity(A2, 70);
-    conf.setUserLimitFactor(A2, 100.0f);
+    config.setUserLimitFactor(A1, 100.0f);
+    config.setCapacity(A2, 70);
+    config.setUserLimitFactor(A2, 100.0f);
 
     final String B1 = B + ".b1";
     final String B2 = B + ".b2";
     final String B3 = B + ".b3";
-    conf.setQueues(B, new String[] { "b1", "b2", "b3" });
-    conf.setCapacity(B1, 60);
-    conf.setUserLimitFactor(B1, 100.0f);
-    conf.setCapacity(B2, 39.5f);
-    conf.setUserLimitFactor(B2, 100.0f);
-    conf.setCapacity(B3, 0.5f);
-    conf.setUserLimitFactor(B3, 100.0f);
-    
-    conf.setQueues(A1, new String[] {"a1a", "a1b"});
+    config.setQueues(B, new String[] {"b1", "b2", "b3"});
+    config.setCapacity(B1, 60);
+    config.setUserLimitFactor(B1, 100.0f);
+    config.setCapacity(B2, 39.5f);
+    config.setUserLimitFactor(B2, 100.0f);
+    config.setCapacity(B3, 0.5f);
+    config.setUserLimitFactor(B3, 100.0f);
+
+    config.setQueues(A1, new String[] {"a1a", "a1b"});
     final String A1A = A1 + ".a1a";
-    conf.setCapacity(A1A, 85);
+    config.setCapacity(A1A, 85);
     final String A1B = A1 + ".a1b";
-    conf.setCapacity(A1B, 15);
+    config.setCapacity(A1B, 15);
   }
 
   @Before
   @Override
   public void setUp() throws Exception {
     super.setUp();
+    GuiceServletConfig.setInjector(
+        Guice.createInjector(new WebServletModule()));
   }
 
   public TestRMWebServicesCapacitySched() {
@@ -176,7 +178,8 @@ public class TestRMWebServicesCapacitySched extends JerseyTestBase {
     ClientResponse response = r.path("ws").path("v1").path("cluster")
         .path("scheduler").accept(MediaType.APPLICATION_JSON)
         .get(ClientResponse.class);
-    assertEquals(MediaType.APPLICATION_JSON_TYPE, response.getType());
+    assertEquals(MediaType.APPLICATION_JSON_TYPE + "; " + JettyUtils.UTF_8,
+        response.getType().toString());
     JSONObject json = response.getEntity(JSONObject.class);
     verifyClusterScheduler(json);
   }
@@ -187,7 +190,8 @@ public class TestRMWebServicesCapacitySched extends JerseyTestBase {
     ClientResponse response = r.path("ws").path("v1").path("cluster")
         .path("scheduler/").accept(MediaType.APPLICATION_JSON)
         .get(ClientResponse.class);
-    assertEquals(MediaType.APPLICATION_JSON_TYPE, response.getType());
+    assertEquals(MediaType.APPLICATION_JSON_TYPE + "; " + JettyUtils.UTF_8,
+        response.getType().toString());
     JSONObject json = response.getEntity(JSONObject.class);
     verifyClusterScheduler(json);
   }
@@ -197,7 +201,8 @@ public class TestRMWebServicesCapacitySched extends JerseyTestBase {
     WebResource r = resource();
     ClientResponse response = r.path("ws").path("v1").path("cluster")
         .path("scheduler").get(ClientResponse.class);
-    assertEquals(MediaType.APPLICATION_JSON_TYPE, response.getType());
+    assertEquals(MediaType.APPLICATION_JSON_TYPE + "; " + JettyUtils.UTF_8,
+        response.getType().toString());
     JSONObject json = response.getEntity(JSONObject.class);
     verifyClusterScheduler(json);
   }
@@ -208,7 +213,8 @@ public class TestRMWebServicesCapacitySched extends JerseyTestBase {
     ClientResponse response = r.path("ws").path("v1").path("cluster")
         .path("scheduler/").accept(MediaType.APPLICATION_XML)
         .get(ClientResponse.class);
-    assertEquals(MediaType.APPLICATION_XML_TYPE, response.getType());
+    assertEquals(MediaType.APPLICATION_XML_TYPE + "; " + JettyUtils.UTF_8,
+        response.getType().toString());
     String xml = response.getEntity(String.class);
     DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
     DocumentBuilder db = dbf.newDocumentBuilder();
@@ -250,7 +256,7 @@ public class TestRMWebServicesCapacitySched extends JerseyTestBase {
     }
   }
 
-  public void verifySubQueueXML(Element qElem, String q, 
+  public void verifySubQueueXML(Element qElem, String q,
       float parentAbsCapacity, float parentAbsMaxCapacity)
       throws Exception {
     NodeList children = qElem.getChildNodes();
@@ -313,26 +319,34 @@ public class TestRMWebServicesCapacitySched extends JerseyTestBase {
 
   private void verifyClusterScheduler(JSONObject json) throws JSONException,
       Exception {
-    assertEquals("incorrect number of elements", 1, json.length());
+    assertEquals("incorrect number of elements in: " + json, 1, json.length());
     JSONObject info = json.getJSONObject("scheduler");
-    assertEquals("incorrect number of elements", 1, info.length());
+    assertEquals("incorrect number of elements in: " + info, 1, info.length());
     info = info.getJSONObject("schedulerInfo");
-    assertEquals("incorrect number of elements", 8, info.length());
+    assertEquals("incorrect number of elements in: " + info, 8, info.length());
     verifyClusterSchedulerGeneric(info.getString("type"),
         (float) info.getDouble("usedCapacity"),
         (float) info.getDouble("capacity"),
         (float) info.getDouble("maxCapacity"), info.getString("queueName"));
     JSONObject health = info.getJSONObject("health");
     assertNotNull(health);
-    assertEquals("incorrect number of elements", 3, health.length());
+    assertEquals("incorrect number of elements in: " + health, 3,
+        health.length());
+    JSONArray operationsInfo = health.getJSONArray("operationsInfo");
+    assertEquals("incorrect number of elements in: " + health, 4,
+        operationsInfo.length());
+    JSONArray lastRunDetails = health.getJSONArray("lastRunDetails");
+    assertEquals("incorrect number of elements in: " + health, 3,
+        lastRunDetails.length());
 
     JSONArray arr = info.getJSONObject("queues").getJSONArray("queue");
-    assertEquals("incorrect number of elements", 2, arr.length());
+    assertEquals("incorrect number of elements in: " + arr, 2, arr.length());
 
     // test subqueues
     for (int i = 0; i < arr.length(); i++) {
       JSONObject obj = arr.getJSONObject(i);
-      String q = CapacitySchedulerConfiguration.ROOT + "." + obj.getString("queueName");
+      String q = CapacitySchedulerConfiguration.ROOT + "." +
+              obj.getString("queueName");
       verifySubQueue(obj, q, 100, 100);
     }
   }
@@ -347,13 +361,13 @@ public class TestRMWebServicesCapacitySched extends JerseyTestBase {
     assertTrue("queueName doesn't match", "root".matches(queueName));
   }
 
-  private void verifySubQueue(JSONObject info, String q, 
+  private void verifySubQueue(JSONObject info, String q,
       float parentAbsCapacity, float parentAbsMaxCapacity)
       throws JSONException, Exception {
-    int numExpectedElements = 18;
+    int numExpectedElements = 20;
     boolean isParentQueue = true;
     if (!info.has("queues")) {
-      numExpectedElements = 31;
+      numExpectedElements = 35;
       isParentQueue = false;
     }
     assertEquals("incorrect number of elements", numExpectedElements, info.length());
@@ -438,8 +452,9 @@ public class TestRMWebServicesCapacitySched extends JerseyTestBase {
 
     int maxSystemApps = csConf.getMaximumSystemApplications();
     int expectedMaxApps = (int)(maxSystemApps * (info.absoluteCapacity/100));
-    int expectedMaxAppsPerUser =
-      (int)(expectedMaxApps * (info.userLimit/100.0f) * info.userLimitFactor);
+    int expectedMaxAppsPerUser = Math.min(expectedMaxApps,
+        (int)(expectedMaxApps * (info.userLimit/100.0f) *
+        info.userLimitFactor));
 
     // TODO: would like to use integer comparisons here but can't due to
     //       roundoff errors in absolute capacity calculations
@@ -455,7 +470,7 @@ public class TestRMWebServicesCapacitySched extends JerseyTestBase {
         csConf.getUserLimitFactor(q), info.userLimitFactor, 1e-3f);
   }
 
-  //Return a child Node of node with the tagname or null if none exists 
+  //Return a child Node of node with the tagname or null if none exists
   private Node getChildNodeByName(Node node, String tagname) {
     NodeList nodeList = node.getChildNodes();
     for (int i=0; i < nodeList.getLength(); ++i) {
@@ -482,7 +497,8 @@ public class TestRMWebServicesCapacitySched extends JerseyTestBase {
       WebResource r = resource();
       ClientResponse response = r.path("ws/v1/cluster/scheduler")
         .accept(MediaType.APPLICATION_XML).get(ClientResponse.class);
-      assertEquals(MediaType.APPLICATION_XML_TYPE, response.getType());
+      assertEquals(MediaType.APPLICATION_XML_TYPE + "; " + JettyUtils.UTF_8,
+          response.getType().toString());
       String xml = response.getEntity(String.class);
       DocumentBuilder db = DocumentBuilderFactory.newInstance()
         .newDocumentBuilder();
@@ -504,7 +520,7 @@ public class TestRMWebServicesCapacitySched extends JerseyTestBase {
           for (int j=0; j<users.getLength(); ++j) {
             Node user = users.item(j);
             String username = getChildNodeByName(user, "username")
-              .getTextContent(); 
+                .getTextContent();
             assertTrue(username.equals("user1") || username.equals("user2"));
             //Should be a parsable integer
             Integer.parseInt(getChildNodeByName(getChildNodeByName(user,
@@ -563,7 +579,8 @@ public class TestRMWebServicesCapacitySched extends JerseyTestBase {
       ClientResponse response = r.path("ws").path("v1").path("cluster")
           .path("scheduler/").accept(MediaType.APPLICATION_JSON)
           .get(ClientResponse.class);
-      assertEquals(MediaType.APPLICATION_JSON_TYPE, response.getType());
+      assertEquals(MediaType.APPLICATION_JSON_TYPE + "; " + JettyUtils.UTF_8,
+          response.getType().toString());
       JSONObject json = response.getEntity(JSONObject.class);
 
       JSONObject schedulerInfo = json.getJSONObject("scheduler").getJSONObject(

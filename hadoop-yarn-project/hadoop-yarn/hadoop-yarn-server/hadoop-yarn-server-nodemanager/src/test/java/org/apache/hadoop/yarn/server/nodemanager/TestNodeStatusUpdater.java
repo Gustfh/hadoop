@@ -27,7 +27,6 @@ import java.io.File;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -45,8 +44,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileContext;
 import org.apache.hadoop.fs.Path;
@@ -77,11 +74,12 @@ import org.apache.hadoop.yarn.client.RMProxy;
 import org.apache.hadoop.yarn.conf.HAUtil;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.Dispatcher;
+import org.apache.hadoop.yarn.event.Event;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
-import org.apache.hadoop.yarn.factories.RecordFactory;
-import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
+import org.apache.hadoop.yarn.factories.impl.pb.RpcClientFactoryPBImpl;
+import org.apache.hadoop.yarn.factories.impl.pb.RpcServerFactoryPBImpl;
 import org.apache.hadoop.yarn.proto.YarnServerCommonServiceProtos.NodeHeartbeatResponseProto;
 import org.apache.hadoop.yarn.security.ContainerTokenIdentifier;
 import org.apache.hadoop.yarn.server.api.ResourceTracker;
@@ -115,41 +113,17 @@ import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import org.apache.hadoop.ipc.RPC;
+import org.apache.hadoop.ipc.Server;
 
 @SuppressWarnings("rawtypes")
-public class TestNodeStatusUpdater {
-
-  // temp fix until metrics system can auto-detect itself running in unit test:
-  static {
-    DefaultMetricsSystem.setMiniClusterMode(true);
-  }
-
-  static final Log LOG = LogFactory.getLog(TestNodeStatusUpdater.class);
-  static final File basedir =
-      new File("target", TestNodeStatusUpdater.class.getName());
-  static final File nmLocalDir = new File(basedir, "nm0");
-  static final File tmpDir = new File(basedir, "tmpDir");
-  static final File remoteLogsDir = new File(basedir, "remotelogs");
-  static final File logsDir = new File(basedir, "logs");
-  private static final RecordFactory recordFactory = RecordFactoryProvider
-      .getRecordFactory(null);
-
+public class TestNodeStatusUpdater extends NodeManagerTestBase {
   volatile int heartBeatID = 0;
   volatile Throwable nmStartError = null;
   private final List<NodeId> registeredNodes = new ArrayList<NodeId>();
   private boolean triggered = false;
-  private Configuration conf;
   private NodeManager nm;
   private AtomicBoolean assertionFailedInThread = new AtomicBoolean(false);
-
-  @Before
-  public void setUp() throws IOException {
-    nmLocalDir.mkdirs();
-    tmpDir.mkdirs();
-    logsDir.mkdirs();
-    remoteLogsDir.mkdirs();
-    conf = createNMConfig();
-  }
 
   @After
   public void tearDown() {
@@ -189,7 +163,7 @@ public class TestNodeStatusUpdater {
       InetSocketAddress expected = NetUtils.getConnectAddress(
           conf.getSocketAddr(YarnConfiguration.NM_ADDRESS, null, -1));
       Assert.assertEquals(NetUtils.getHostPortString(expected), nodeId.toString());
-      Assert.assertEquals(5 * 1024, resource.getMemory());
+      Assert.assertEquals(5 * 1024, resource.getMemorySize());
       registeredNodes.add(nodeId);
 
       RegisterNodeManagerResponse response = recordFactory
@@ -223,7 +197,8 @@ public class TestNodeStatusUpdater {
       LOG.info("Got heartbeat number " + heartBeatID);
       NodeManagerMetrics mockMetrics = mock(NodeManagerMetrics.class);
       Dispatcher mockDispatcher = mock(Dispatcher.class);
-      EventHandler mockEventHandler = mock(EventHandler.class);
+      @SuppressWarnings("unchecked")
+      EventHandler<Event> mockEventHandler = mock(EventHandler.class);
       when(mockDispatcher.getEventHandler()).thenReturn(mockEventHandler);
       NMStateStoreService stateStore = new NMNullStateStoreService();
       nodeStatus.setResponseId(heartBeatID++);
@@ -250,7 +225,7 @@ public class TestNodeStatusUpdater {
         String user = "testUser";
         ContainerTokenIdentifier containerToken = BuilderUtils
             .newContainerTokenIdentifier(BuilderUtils.newContainerToken(
-                firstContainerID, InetAddress.getByName("localhost")
+                firstContainerID, 0, InetAddress.getByName("localhost")
                     .getCanonicalHostName(), 1234, user, resource,
                 currentTime + 10000, 123, "password".getBytes(), currentTime));
         Context context = mock(Context.class);
@@ -291,7 +266,7 @@ public class TestNodeStatusUpdater {
         Resource resource = BuilderUtils.newResource(3, 1);
         ContainerTokenIdentifier containerToken = BuilderUtils
             .newContainerTokenIdentifier(BuilderUtils.newContainerToken(
-                secondContainerID, InetAddress.getByName("localhost")
+                secondContainerID, 0, InetAddress.getByName("localhost")
                     .getCanonicalHostName(), 1234, user, resource,
                 currentTime + 10000, 123, "password".getBytes(), currentTime));
         Context context = mock(Context.class);
@@ -331,29 +306,7 @@ public class TestNodeStatusUpdater {
     }
   }
 
-  private class MyContainerManager extends ContainerManagerImpl {
-    public boolean signaled = false;
-
-    public MyContainerManager(Context context, ContainerExecutor exec,
-        DeletionService deletionContext, NodeStatusUpdater nodeStatusUpdater,
-        NodeManagerMetrics metrics,
-        LocalDirsHandlerService dirsHandler) {
-      super(context, exec, deletionContext, nodeStatusUpdater,
-          metrics, dirsHandler);
-    }
-
-    @Override
-    public void handle(ContainerManagerEvent event) {
-      if (event.getType() == ContainerManagerEventType.SIGNAL_CONTAINERS) {
-        signaled = true;
-      }
-    }
-  }
-
-  private class MyNodeStatusUpdater extends NodeStatusUpdaterImpl {
-    public ResourceTracker resourceTracker;
-    private Context context;
-
+  private class MyNodeStatusUpdater extends BaseNodeStatusUpdaterForTest {
     public MyNodeStatusUpdater(Context context, Dispatcher dispatcher,
         NodeHealthCheckerService healthChecker, NodeManagerMetrics metrics) {
       this(context, dispatcher, healthChecker, metrics, false);
@@ -362,19 +315,8 @@ public class TestNodeStatusUpdater {
     public MyNodeStatusUpdater(Context context, Dispatcher dispatcher,
         NodeHealthCheckerService healthChecker, NodeManagerMetrics metrics,
         boolean signalContainer) {
-      super(context, dispatcher, healthChecker, metrics);
-      this.context = context;
-      resourceTracker = new MyResourceTracker(this.context, signalContainer);
-    }
-
-    @Override
-    protected ResourceTracker getRMClient() {
-      return resourceTracker;
-    }
-
-    @Override
-    protected void stopRMProxy() {
-      return;
+      super(context, dispatcher, healthChecker, metrics,
+          new MyResourceTracker(context, signalContainer));
     }
   }
 
@@ -386,16 +328,28 @@ public class TestNodeStatusUpdater {
     public MyNodeStatusUpdater2(Context context, Dispatcher dispatcher,
         NodeHealthCheckerService healthChecker, NodeManagerMetrics metrics) {
       super(context, dispatcher, healthChecker, metrics);
-      resourceTracker = new MyResourceTracker4(context);
+      InetSocketAddress address = new InetSocketAddress(0);
+      Configuration configuration = new Configuration();
+      Server server = RpcServerFactoryPBImpl.get().getServer(
+          ResourceTracker.class, new MyResourceTracker4(context), address,
+          configuration, null, 1);
+      server.start();
+      this.resourceTracker = (ResourceTracker) RpcClientFactoryPBImpl.get()
+          .getClient(
+          ResourceTracker.class, 1, NetUtils.getConnectAddress(server),
+              configuration);
     }
 
     @Override
-    protected ResourceTracker getRMClient() {
+    protected ResourceTracker getRMClient() throws IOException {
       return resourceTracker;
     }
 
     @Override
     protected void stopRMProxy() {
+      if (this.resourceTracker != null) {
+        RPC.stopProxy(this.resourceTracker);
+      }
       return;
     }
   }
@@ -560,6 +514,8 @@ public class TestNodeStatusUpdater {
 
     @Override
     protected void serviceStop() throws Exception {
+      // Make sure that all containers are started before starting shutdown
+      syncBarrier.await(10000, TimeUnit.MILLISECONDS);
       System.out.println("Called stooppppp");
       super.serviceStop();
       isStopped = true;
@@ -839,7 +795,8 @@ public class TestNodeStatusUpdater {
       ByteBuffer byteBuffer1 =
           ByteBuffer.wrap(dob.getData(), 0, dob.getLength());
       appCredentials.put(ApplicationId.newInstance(1234, 1), byteBuffer1);
-      nhResponse.setSystemCredentialsForApps(appCredentials);
+      nhResponse.setSystemCredentialsForApps(
+          YarnServerBuilderUtils.convertToProtoFormat(appCredentials));
       return nhResponse;
     }
 
@@ -917,7 +874,7 @@ public class TestNodeStatusUpdater {
             conf.getSocketAddr(YarnConfiguration.NM_ADDRESS, null, -1));
         Assert.assertEquals(NetUtils.getHostPortString(expected),
             nodeId.toString());
-        Assert.assertEquals(5 * 1024, resource.getMemory());
+        Assert.assertEquals(5 * 1024, resource.getMemorySize());
         registeredNodes.add(nodeId);
 
         RegisterNodeManagerResponse response = recordFactory
@@ -1010,7 +967,7 @@ public class TestNodeStatusUpdater {
   
     ContainerId cId = ContainerId.newContainerId(appAttemptId, 1);
     Token containerToken =
-        BuilderUtils.newContainerToken(cId, "anyHost", 1234, "anyUser",
+        BuilderUtils.newContainerToken(cId, 0, "anyHost", 1234, "anyUser",
             BuilderUtils.newResource(1024, 1), 0, 123,
             "password".getBytes(), 0);
     Container anyCompletedContainer = new ContainerImpl(conf, null,
@@ -1032,7 +989,7 @@ public class TestNodeStatusUpdater {
     ContainerId runningContainerId =
         ContainerId.newContainerId(appAttemptId, 3);
     Token runningContainerToken =
-        BuilderUtils.newContainerToken(runningContainerId, "anyHost",
+        BuilderUtils.newContainerToken(runningContainerId, 0, "anyHost",
           1234, "anyUser", BuilderUtils.newResource(1024, 1), 0, 123,
           "password".getBytes(), 0);
     Container runningContainer =
@@ -1091,9 +1048,10 @@ public class TestNodeStatusUpdater {
         ApplicationAttemptId.newInstance(appId, 0);
     ContainerId containerId = ContainerId.newContainerId(appAttemptId, 1);
     Token containerToken =
-        BuilderUtils.newContainerToken(containerId, "host", 1234, "user",
+        BuilderUtils.newContainerToken(containerId, 0, "host", 1234, "user",
             BuilderUtils.newResource(1024, 1), 0, 123,
             "password".getBytes(), 0);
+
     Container completedContainer = new ContainerImpl(conf, null,
         null, null, null,
         BuilderUtils.newContainerTokenIdentifier(containerToken),
@@ -1129,7 +1087,7 @@ public class TestNodeStatusUpdater {
 
     ContainerId cId = ContainerId.newContainerId(appAttemptId, 1);
     Token containerToken =
-        BuilderUtils.newContainerToken(cId, "anyHost", 1234, "anyUser",
+        BuilderUtils.newContainerToken(cId, 0, "anyHost", 1234, "anyUser",
             BuilderUtils.newResource(1024, 1), 0, 123,
             "password".getBytes(), 0);
     Container anyCompletedContainer = new ContainerImpl(conf, null,
@@ -1352,7 +1310,7 @@ public class TestNodeStatusUpdater {
       }
     };
     verifyNodeStartFailure(
-          "Recieved SHUTDOWN signal from Resourcemanager, "
+          "Received SHUTDOWN signal from Resourcemanager, "
         + "Registration of NodeManager failed, "
         + "Message from ResourceManager: RM Shutting Down Node");
   }
@@ -1398,13 +1356,13 @@ public class TestNodeStatusUpdater {
       long t = System.currentTimeMillis();
       long duration = t - waitStartTime;
       boolean waitTimeValid = (duration >= nmRmConnectionWaitMs) &&
-          (duration < (connectionWaitMs + delta));
+          (duration < (nmRmConnectionWaitMs + delta));
 
       if(!waitTimeValid) {
         // throw exception if NM doesn't retry long enough
         throw new Exception("NM should have tried re-connecting to RM during " +
-          "period of at least " + connectionWaitMs + " ms, but " +
-          "stopped retrying within " + (connectionWaitMs + delta) +
+          "period of at least " + nmRmConnectionWaitMs + " ms, but " +
+          "stopped retrying within " + (nmRmConnectionWaitMs + delta) +
           " ms: " + e, e);
       }
     }
@@ -1583,9 +1541,10 @@ public class TestNodeStatusUpdater {
       protected NMContext createNMContext(
           NMContainerTokenSecretManager containerTokenSecretManager,
           NMTokenSecretManagerInNM nmTokenSecretManager,
-          NMStateStoreService store, boolean isDistributedSchedulingEnabled) {
+          NMStateStoreService store, boolean isDistributedSchedulingEnabled,
+          Configuration config) {
         return new MyNMContext(containerTokenSecretManager,
-          nmTokenSecretManager);
+          nmTokenSecretManager, config);
       }
     };
 
@@ -1634,6 +1593,9 @@ public class TestNodeStatusUpdater {
         new File("start_file.txt"), port);
 
     try {
+      // Wait until we start stopping
+      syncBarrier.await(10000, TimeUnit.MILLISECONDS);
+      // Wait until we finish stopping
       syncBarrier.await(10000, TimeUnit.MILLISECONDS);
     } catch (Exception e) {
     }
@@ -1756,7 +1718,8 @@ public class TestNodeStatusUpdater {
 
   @Test
   public void testConcurrentAccessToSystemCredentials(){
-    final Map<ApplicationId, ByteBuffer> testCredentials = new HashMap<>();
+    final Map<ApplicationId, ByteBuffer> testCredentials =
+        new HashMap<>();
     ByteBuffer byteBuffer = ByteBuffer.wrap(new byte[300]);
     ApplicationId applicationId = ApplicationId.newInstance(123456, 120);
     testCredentials.put(applicationId, byteBuffer);
@@ -1781,8 +1744,9 @@ public class TestNodeStatusUpdater {
                 NodeHeartbeatResponse nodeHeartBeatResponse =
                     newNodeHeartbeatResponse(0, NodeAction.NORMAL,
                         null, null, null, null, 0);
-                nodeHeartBeatResponse.setSystemCredentialsForApps(
-                    testCredentials);
+                nodeHeartBeatResponse
+                    .setSystemCredentialsForApps(YarnServerBuilderUtils
+                        .convertToProtoFormat(testCredentials));
                 NodeHeartbeatResponseProto proto =
                     ((NodeHeartbeatResponsePBImpl)nodeHeartBeatResponse)
                         .getProto();
@@ -1810,15 +1774,14 @@ public class TestNodeStatusUpdater {
     Assert.assertTrue("Test failed with exception(s)" + exceptions,
         exceptions.isEmpty());
   }
-
   // Add new containers info into NM context each time node heart beats.
   private class MyNMContext extends NMContext {
 
     public MyNMContext(
         NMContainerTokenSecretManager containerTokenSecretManager,
-        NMTokenSecretManagerInNM nmTokenSecretManager) {
+        NMTokenSecretManagerInNM nmTokenSecretManager, Configuration conf) {
       super(containerTokenSecretManager, nmTokenSecretManager, null, null,
-          new NMNullStateStoreService(), false);
+          new NMNullStateStoreService(), false, conf);
     }
 
     @Override
@@ -1912,31 +1875,6 @@ public class TestNodeStatusUpdater {
 
     Assert.assertEquals("Number of registered nodes is wrong!", 0,
         this.registeredNodes.size());
-  }
-
-  private YarnConfiguration createNMConfig(int port) throws IOException {
-    YarnConfiguration conf = new YarnConfiguration();
-    String localhostAddress = null;
-    try {
-      localhostAddress = InetAddress.getByName("localhost")
-          .getCanonicalHostName();
-    } catch (UnknownHostException e) {
-      Assert.fail("Unable to get localhost address: " + e.getMessage());
-    }
-    conf.setInt(YarnConfiguration.NM_PMEM_MB, 5 * 1024); // 5GB
-    conf.set(YarnConfiguration.NM_ADDRESS, localhostAddress + ":" + port);
-    conf.set(YarnConfiguration.NM_LOCALIZER_ADDRESS, localhostAddress + ":"
-        + ServerSocketUtil.getPort(49160, 10));
-    conf.set(YarnConfiguration.NM_LOG_DIRS, logsDir.getAbsolutePath());
-    conf.set(YarnConfiguration.NM_REMOTE_APP_LOG_DIR,
-      remoteLogsDir.getAbsolutePath());
-    conf.set(YarnConfiguration.NM_LOCAL_DIRS, nmLocalDir.getAbsolutePath());
-    conf.setLong(YarnConfiguration.NM_LOG_RETAIN_SECONDS, 1);
-    return conf;
-  }
-
-  private YarnConfiguration createNMConfig() throws IOException {
-    return createNMConfig(ServerSocketUtil.getPort(49170, 10));
   }
 
   private NodeManager getNodeManager(final NodeAction nodeHeartBeatAction) {

@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Set;
 
 import org.apache.hadoop.yarn.api.records.ApplicationId;
+import org.apache.hadoop.yarn.api.records.NodeAttribute;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.NodeLabel;
 import org.apache.hadoop.yarn.api.records.Resource;
@@ -41,6 +42,25 @@ public abstract class RegisterNodeManagerRequest {
       int httpPort, Resource resource, String nodeManagerVersionId,
       List<NMContainerStatus> containerStatuses,
       List<ApplicationId> runningApplications, Set<NodeLabel> nodeLabels) {
+    return newInstance(nodeId, httpPort, resource, nodeManagerVersionId,
+        containerStatuses, runningApplications, nodeLabels, null);
+  }
+
+  public static RegisterNodeManagerRequest newInstance(NodeId nodeId,
+      int httpPort, Resource resource, String nodeManagerVersionId,
+      List<NMContainerStatus> containerStatuses,
+      List<ApplicationId> runningApplications, Set<NodeLabel> nodeLabels,
+      Resource physicalResource) {
+    return newInstance(nodeId, httpPort, resource, nodeManagerVersionId,
+        containerStatuses, runningApplications, nodeLabels, physicalResource,
+        null);
+  }
+
+  public static RegisterNodeManagerRequest newInstance(NodeId nodeId,
+      int httpPort, Resource resource, String nodeManagerVersionId,
+      List<NMContainerStatus> containerStatuses,
+      List<ApplicationId> runningApplications, Set<NodeLabel> nodeLabels,
+      Resource physicalResource, Set<NodeAttribute> nodeAttributes) {
     RegisterNodeManagerRequest request =
         Records.newRecord(RegisterNodeManagerRequest.class);
     request.setHttpPort(httpPort);
@@ -50,6 +70,8 @@ public abstract class RegisterNodeManagerRequest {
     request.setContainerStatuses(containerStatuses);
     request.setRunningApplications(runningApplications);
     request.setNodeLabels(nodeLabels);
+    request.setPhysicalResource(physicalResource);
+    request.setNodeAttributes(nodeAttributes);
     return request;
   }
   
@@ -88,4 +110,27 @@ public abstract class RegisterNodeManagerRequest {
    */
   public abstract void setRunningApplications(
       List<ApplicationId> runningApplications);
+
+  /**
+   * Get the physical resources in the node to properly estimate resource
+   * utilization.
+   * @return Physical resources in the node.
+   */
+  public abstract Resource getPhysicalResource();
+
+  /**
+   * Set the physical resources in the node to properly estimate resource
+   * utilization.
+   * @param physicalResource Physical resources in the node.
+   */
+  public abstract void setPhysicalResource(Resource physicalResource);
+
+  public abstract List<LogAggregationReport> getLogAggregationReportsForApps();
+
+  public abstract void setLogAggregationReportsForApps(
+      List<LogAggregationReport> logAggregationReportsForApps);
+
+  public abstract Set<NodeAttribute> getNodeAttributes();
+
+  public abstract void setNodeAttributes(Set<NodeAttribute> nodeAttributes);
 }

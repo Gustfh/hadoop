@@ -22,7 +22,6 @@ import java.util.ArrayList;
 import java.util.List;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.server.resourcemanager.MockNodes;
 import org.apache.hadoop.yarn.server.resourcemanager.MockRM;
@@ -30,17 +29,20 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Matchers.isA;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.spy;
 
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
+import org.apache.hadoop.yarn.server.resourcemanager.placement.ApplicationPlacementContext;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.NodeType;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
+import org.apache.hadoop.yarn.server.scheduler.SchedulerRequestKey;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity
+    .TestUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeAddedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.policies.DominantResourceFairnessPolicy;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.policies.FairSharePolicy;
@@ -65,8 +67,9 @@ public class TestFSAppAttempt extends FairSchedulerTestBase {
   @Test
   public void testDelayScheduling() {
     FSLeafQueue queue = Mockito.mock(FSLeafQueue.class);
-    Priority prio = Mockito.mock(Priority.class);
-    Mockito.when(prio.getPriority()).thenReturn(1);
+    Priority pri = Mockito.mock(Priority.class);
+    SchedulerRequestKey prio = TestUtils.toSchedulerKey(pri);
+    Mockito.when(pri.getPriority()).thenReturn(1);
     double nodeLocalityThreshold = .5;
     double rackLocalityThreshold = .6;
 
@@ -124,8 +127,9 @@ public class TestFSAppAttempt extends FairSchedulerTestBase {
   public void testDelaySchedulingForContinuousScheduling()
           throws InterruptedException {
     FSLeafQueue queue = scheduler.getQueueManager().getLeafQueue("queue", true);
-    Priority prio = Mockito.mock(Priority.class);
-    Mockito.when(prio.getPriority()).thenReturn(1);
+    Priority pri = Mockito.mock(Priority.class);
+    SchedulerRequestKey prio = TestUtils.toSchedulerKey(pri);
+    Mockito.when(pri.getPriority()).thenReturn(1);
 
     ControlledClock clock = new ControlledClock();
     scheduler.setClock(clock);
@@ -182,8 +186,9 @@ public class TestFSAppAttempt extends FairSchedulerTestBase {
    */
   public void testLocalityLevelWithoutDelays() {
     FSLeafQueue queue = Mockito.mock(FSLeafQueue.class);
-    Priority prio = Mockito.mock(Priority.class);
-    Mockito.when(prio.getPriority()).thenReturn(1);
+    Priority pri = Mockito.mock(Priority.class);
+    SchedulerRequestKey prio = TestUtils.toSchedulerKey(pri);
+    Mockito.when(pri.getPriority()).thenReturn(1);
 
     RMContext rmContext = resourceManager.getRMContext();
     ApplicationAttemptId applicationAttemptId = createAppAttemptId(1, 1);
@@ -238,9 +243,9 @@ public class TestFSAppAttempt extends FairSchedulerTestBase {
     Mockito.when(mockQueue.getPolicy()).thenReturn(SchedulingPolicy
         .getInstance(DominantResourceFairnessPolicy.class));
     verifyHeadroom(schedulerApp,
-        min(queueStarvation.getMemory(),
-            clusterAvailable.getMemory(),
-            queueMaxResourcesAvailable.getMemory()),
+        min(queueStarvation.getMemorySize(),
+            clusterAvailable.getMemorySize(),
+            queueMaxResourcesAvailable.getMemorySize()),
         min(queueStarvation.getVirtualCores(),
             clusterAvailable.getVirtualCores(),
             queueMaxResourcesAvailable.getVirtualCores())
@@ -250,9 +255,9 @@ public class TestFSAppAttempt extends FairSchedulerTestBase {
     Mockito.when(mockQueue.getPolicy()).thenReturn(SchedulingPolicy
         .getInstance(FairSharePolicy.class));
     verifyHeadroom(schedulerApp,
-        min(queueStarvation.getMemory(),
-            clusterAvailable.getMemory(),
-            queueMaxResourcesAvailable.getMemory()),
+        min(queueStarvation.getMemorySize(),
+            clusterAvailable.getMemorySize(),
+            queueMaxResourcesAvailable.getMemorySize()),
         Math.min(
             clusterAvailable.getVirtualCores(),
             queueMaxResourcesAvailable.getVirtualCores())
@@ -261,9 +266,9 @@ public class TestFSAppAttempt extends FairSchedulerTestBase {
     Mockito.when(mockQueue.getPolicy()).thenReturn(SchedulingPolicy
         .getInstance(FifoPolicy.class));
     verifyHeadroom(schedulerApp,
-        min(queueStarvation.getMemory(),
-            clusterAvailable.getMemory(),
-            queueMaxResourcesAvailable.getMemory()),
+        min(queueStarvation.getMemorySize(),
+            clusterAvailable.getMemorySize(),
+            queueMaxResourcesAvailable.getMemorySize()),
         Math.min(
             clusterAvailable.getVirtualCores(),
             queueMaxResourcesAvailable.getVirtualCores())
@@ -288,21 +293,23 @@ public class TestFSAppAttempt extends FairSchedulerTestBase {
     Resource clusterResource = scheduler.getClusterResource();
     Resource clusterUsage = scheduler.getRootQueueMetrics()
         .getAllocatedResources();
-    assertEquals(12 * 1024, clusterResource.getMemory());
+    assertEquals(12 * 1024, clusterResource.getMemorySize());
     assertEquals(12, clusterResource.getVirtualCores());
-    assertEquals(0, clusterUsage.getMemory());
+    assertEquals(0, clusterUsage.getMemorySize());
     assertEquals(0, clusterUsage.getVirtualCores());
     ApplicationAttemptId id11 = createAppAttemptId(1, 1);
     createMockRMApp(id11);
+    ApplicationPlacementContext placementCtx =
+        new ApplicationPlacementContext("default");
     scheduler.addApplication(id11.getApplicationId(),
-            "default", "user1", false);
+            "default", "user1", false, placementCtx);
     scheduler.addApplicationAttempt(id11, false, false);
     assertNotNull(scheduler.getSchedulerApplications().get(id11.
             getApplicationId()));
     FSAppAttempt app = scheduler.getSchedulerApp(id11);
     assertNotNull(app);
     Resource queueUsage = app.getQueue().getResourceUsage();
-    assertEquals(0, queueUsage.getMemory());
+    assertEquals(0, queueUsage.getMemorySize());
     assertEquals(0, queueUsage.getVirtualCores());
     SchedulerNode n1 = scheduler.getSchedulerNode(node1.getNodeID());
     SchedulerNode n2 = scheduler.getSchedulerNode(node2.getNodeID());
@@ -311,40 +318,40 @@ public class TestFSAppAttempt extends FairSchedulerTestBase {
     List<String> blacklistAdditions = new ArrayList<String>(1);
     List<String> blacklistRemovals = new ArrayList<String>(1);
     blacklistAdditions.add(n1.getNodeName());
-    app.updateBlacklist(blacklistAdditions, blacklistRemovals);
-    app.getQueue().setFairShare(clusterResource);
     FSAppAttempt spyApp = spy(app);
     doReturn(false)
         .when(spyApp).isWaitingForAMContainer();
-    assertTrue(spyApp.isBlacklisted(n1.getNodeName()));
-    assertFalse(spyApp.isBlacklisted(n2.getNodeName()));
+    spyApp.updateBlacklist(blacklistAdditions, blacklistRemovals);
+    spyApp.getQueue().setFairShare(clusterResource);
+    assertTrue(spyApp.isPlaceBlacklisted(n1.getNodeName()));
+    assertFalse(spyApp.isPlaceBlacklisted(n2.getNodeName()));
     assertEquals(n2.getUnallocatedResource(), spyApp.getHeadroom());
 
     blacklistAdditions.clear();
     blacklistAdditions.add(n2.getNodeName());
     blacklistRemovals.add(n1.getNodeName());
-    app.updateBlacklist(blacklistAdditions, blacklistRemovals);
-    assertFalse(spyApp.isBlacklisted(n1.getNodeName()));
-    assertTrue(spyApp.isBlacklisted(n2.getNodeName()));
+    spyApp.updateBlacklist(blacklistAdditions, blacklistRemovals);
+    assertFalse(spyApp.isPlaceBlacklisted(n1.getNodeName()));
+    assertTrue(spyApp.isPlaceBlacklisted(n2.getNodeName()));
     assertEquals(n1.getUnallocatedResource(), spyApp.getHeadroom());
 
     blacklistAdditions.clear();
     blacklistRemovals.clear();
     blacklistRemovals.add(n2.getNodeName());
-    app.updateBlacklist(blacklistAdditions, blacklistRemovals);
-    assertFalse(spyApp.isBlacklisted(n1.getNodeName()));
-    assertFalse(spyApp.isBlacklisted(n2.getNodeName()));
+    spyApp.updateBlacklist(blacklistAdditions, blacklistRemovals);
+    assertFalse(spyApp.isPlaceBlacklisted(n1.getNodeName()));
+    assertFalse(spyApp.isPlaceBlacklisted(n2.getNodeName()));
     assertEquals(clusterResource, spyApp.getHeadroom());
   }
 
-  private static int min(int value1, int value2, int value3) {
+  private static long min(long value1, long value2, long value3) {
     return Math.min(Math.min(value1, value2), value3);
   }
 
   protected void verifyHeadroom(FSAppAttempt schedulerApp,
-                                int expectedMemory, int expectedCPU) {
+                                long expectedMemory, long expectedCPU) {
     Resource headroom = schedulerApp.getHeadroom();
-    assertEquals(expectedMemory, headroom.getMemory());
+    assertEquals(expectedMemory, headroom.getMemorySize());
     assertEquals(expectedCPU, headroom.getVirtualCores());
   }
 }

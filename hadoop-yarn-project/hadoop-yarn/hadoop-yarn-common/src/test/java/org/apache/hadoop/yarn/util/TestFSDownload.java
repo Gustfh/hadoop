@@ -53,12 +53,13 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 import org.apache.hadoop.util.concurrent.HadoopExecutors;
+import org.apache.hadoop.yarn.api.records.URL;
 import org.junit.Assert;
 
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -81,15 +82,20 @@ import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 
+/**
+ * Unit test for the FSDownload class.
+ */
 public class TestFSDownload {
 
-  private static final Log LOG = LogFactory.getLog(TestFSDownload.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestFSDownload.class);
   private static AtomicLong uniqueNumberGenerator =
     new AtomicLong(System.currentTimeMillis());
   private enum TEST_FILE_TYPE {
     TAR, JAR, ZIP, TGZ
   };
-  
+  private Configuration conf = new Configuration();
+
   @AfterClass
   public static void deleteTestDir() throws IOException {
     FileContext fs = FileContext.getLocalFSFileContext();
@@ -103,7 +109,7 @@ public class TestFSDownload {
       Random r, LocalResourceVisibility vis) throws IOException {
     createFile(files, p, len, r);
     LocalResource ret = recordFactory.newRecordInstance(LocalResource.class);
-    ret.setResource(ConverterUtils.getYarnUrlFromPath(p));
+    ret.setResource(URL.fromPath(p));
     ret.setSize(len);
     ret.setType(LocalResourceType.FILE);
     ret.setVisibility(vis);
@@ -131,10 +137,22 @@ public class TestFSDownload {
     FileOutputStream stream = new FileOutputStream(jarFile);
     LOG.info("Create jar out stream ");
     JarOutputStream out = new JarOutputStream(stream, new Manifest());
+    ZipEntry entry = new ZipEntry("classes/1.class");
+    out.putNextEntry(entry);
+    out.write(1);
+    out.write(2);
+    out.write(3);
+    out.closeEntry();
+    ZipEntry entry2 = new ZipEntry("classes/2.class");
+    out.putNextEntry(entry2);
+    out.write(1);
+    out.write(2);
+    out.write(3);
+    out.closeEntry();
     LOG.info("Done writing jar stream ");
     out.close();
     LocalResource ret = recordFactory.newRecordInstance(LocalResource.class);
-    ret.setResource(ConverterUtils.getYarnUrlFromPath(p));
+    ret.setResource(URL.fromPath(p));
     FileStatus status = files.getFileStatus(p);
     ret.setSize(status.getLen());
     ret.setTimestamp(status.getModificationTime());
@@ -162,7 +180,7 @@ public class TestFSDownload {
     out.close();
 
     LocalResource ret = recordFactory.newRecordInstance(LocalResource.class);
-    ret.setResource(ConverterUtils.getYarnUrlFromPath(new Path(p.toString()
+    ret.setResource(URL.fromPath(new Path(p.toString()
         + ".tar")));
     ret.setSize(len);
     ret.setType(LocalResourceType.ARCHIVE);
@@ -190,7 +208,7 @@ public class TestFSDownload {
     out.close();
 
     LocalResource ret = recordFactory.newRecordInstance(LocalResource.class);
-    ret.setResource(ConverterUtils.getYarnUrlFromPath(new Path(p.toString()
+    ret.setResource(URL.fromPath(new Path(p.toString()
         + ".tar.gz")));
     ret.setSize(len);
     ret.setType(LocalResourceType.ARCHIVE);
@@ -216,7 +234,7 @@ public class TestFSDownload {
     out.close();
 
     LocalResource ret = recordFactory.newRecordInstance(LocalResource.class);
-    ret.setResource(ConverterUtils.getYarnUrlFromPath(new Path(p.toString()
+    ret.setResource(URL.fromPath(new Path(p.toString()
         + ".jar")));
     ret.setSize(len);
     ret.setType(LocalResourceType.ARCHIVE);
@@ -242,7 +260,7 @@ public class TestFSDownload {
     out.close();
 
     LocalResource ret = recordFactory.newRecordInstance(LocalResource.class);
-    ret.setResource(ConverterUtils.getYarnUrlFromPath(new Path(p.toString()
+    ret.setResource(URL.fromPath(new Path(p.toString()
         + ".ZIP")));
     ret.setSize(len);
     ret.setType(LocalResourceType.ARCHIVE);
@@ -255,7 +273,6 @@ public class TestFSDownload {
   @Test (timeout=10000)
   public void testDownloadBadPublic() throws IOException, URISyntaxException,
       InterruptedException {
-    Configuration conf = new Configuration();
     conf.set(CommonConfigurationKeys.FS_PERMISSIONS_UMASK_KEY, "077");
     FileContext files = FileContext.getLocalFSFileContext(conf);
     final Path basedir = files.makeQualified(new Path("target",
@@ -306,7 +323,6 @@ public class TestFSDownload {
   @Test (timeout=60000)
   public void testDownloadPublicWithStatCache() throws IOException,
       URISyntaxException, InterruptedException, ExecutionException {
-    final Configuration conf = new Configuration();
     FileContext files = FileContext.getLocalFSFileContext(conf);
     Path basedir = files.makeQualified(new Path("target",
       TestFSDownload.class.getSimpleName()));
@@ -381,7 +397,6 @@ public class TestFSDownload {
   @Test (timeout=10000)
   public void testDownload() throws IOException, URISyntaxException,
       InterruptedException {
-    Configuration conf = new Configuration();
     conf.set(CommonConfigurationKeys.FS_PERMISSIONS_UMASK_KEY, "077");
     FileContext files = FileContext.getLocalFSFileContext(conf);
     final Path basedir = files.makeQualified(new Path("target",
@@ -454,7 +469,6 @@ public class TestFSDownload {
 
   private void downloadWithFileType(TEST_FILE_TYPE fileType) throws IOException, 
       URISyntaxException, InterruptedException{
-    Configuration conf = new Configuration();
     conf.set(CommonConfigurationKeys.FS_PERMISSIONS_UMASK_KEY, "077");
     FileContext files = FileContext.getLocalFSFileContext(conf);
     final Path basedir = files.makeQualified(new Path("target",
@@ -529,7 +543,7 @@ public class TestFSDownload {
     }
   }
 
-  @Test (timeout=10000) 
+  @Test (timeout=10000)
   public void testDownloadArchive() throws IOException, URISyntaxException,
       InterruptedException {
     downloadWithFileType(TEST_FILE_TYPE.TAR);
@@ -541,7 +555,7 @@ public class TestFSDownload {
     downloadWithFileType(TEST_FILE_TYPE.JAR);
   }
 
-  @Test (timeout=10000) 
+  @Test (timeout=10000)
   public void testDownloadArchiveZip() throws IOException, URISyntaxException,
       InterruptedException {
     downloadWithFileType(TEST_FILE_TYPE.ZIP);
@@ -602,7 +616,6 @@ public class TestFSDownload {
 
   @Test (timeout=10000)
   public void testDirDownload() throws IOException, InterruptedException {
-    Configuration conf = new Configuration();
     FileContext files = FileContext.getLocalFSFileContext(conf);
     final Path basedir = files.makeQualified(new Path("target",
       TestFSDownload.class.getSimpleName()));
@@ -667,7 +680,6 @@ public class TestFSDownload {
 
   @Test (timeout=10000)
   public void testUniqueDestinationPath() throws Exception {
-    Configuration conf = new Configuration();
     FileContext files = FileContext.getLocalFSFileContext(conf);
     final Path basedir = files.makeQualified(new Path("target",
         TestFSDownload.class.getSimpleName()));

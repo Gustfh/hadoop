@@ -19,12 +19,12 @@
 package org.apache.hadoop.util;
 
 import java.io.BufferedReader;
-import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.InputStreamReader;
 import java.io.IOException;
 import java.math.BigInteger;
 import java.nio.charset.Charset;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.regex.Matcher;
@@ -32,11 +32,11 @@ import java.util.regex.Pattern;
 
 import com.google.common.annotations.VisibleForTesting;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.util.Shell.ShellCommandExecutor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Plugin to calculate resource information on Linux systems.
@@ -44,8 +44,8 @@ import org.apache.hadoop.util.Shell.ShellCommandExecutor;
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
 public class SysInfoLinux extends SysInfo {
-  private static final Log LOG =
-      LogFactory.getLog(SysInfoLinux.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(SysInfoLinux.class);
 
   /**
    * proc's meminfo virtual file has keys-values in the format
@@ -53,7 +53,7 @@ public class SysInfoLinux extends SysInfo {
    */
   private static final String PROCFS_MEMFILE = "/proc/meminfo";
   private static final Pattern PROCFS_MEMFILE_FORMAT =
-      Pattern.compile("^([a-zA-Z]*):[ \t]*([0-9]*)[ \t]kB");
+      Pattern.compile("^([a-zA-Z_()]*):[ \t]*([0-9]*)[ \t]*(kB)?");
 
   // We need the values for the following keys in meminfo
   private static final String MEMTOTAL_STRING = "MemTotal";
@@ -61,6 +61,12 @@ public class SysInfoLinux extends SysInfo {
   private static final String MEMFREE_STRING = "MemFree";
   private static final String SWAPFREE_STRING = "SwapFree";
   private static final String INACTIVE_STRING = "Inactive";
+  private static final String INACTIVEFILE_STRING = "Inactive(file)";
+  private static final String HARDWARECORRUPTED_STRING = "HardwareCorrupted";
+  private static final String HUGEPAGESTOTAL_STRING = "HugePages_Total";
+  private static final String HUGEPAGESIZE_STRING = "Hugepagesize";
+
+
 
   /**
    * Patterns for parsing /proc/cpuinfo.
@@ -122,7 +128,13 @@ public class SysInfoLinux extends SysInfo {
   private long swapSize = 0;
   private long ramSizeFree = 0;  // free ram space on the machine (kB)
   private long swapSizeFree = 0; // free swap space on the machine (kB)
-  private long inactiveSize = 0; // inactive cache memory (kB)
+  private long inactiveSize = 0; // inactive memory (kB)
+  private long inactiveFileSize = -1; // inactive cache memory, -1 if not there
+  private long hardwareCorruptSize = 0; // RAM corrupt and not available
+  private long hugePagesTotal = 0; // # of hugepages reserved
+  private long hugePageSize = 0; // # size of each hugepage
+
+
   /* number of logical processors on the system. */
   private int numProcessors = 0;
   /* number of physical cores on the system. */
@@ -205,6 +217,21 @@ public class SysInfoLinux extends SysInfo {
   }
 
   /**
+   *
+   * Wrapper for Long.parseLong() that returns zero if the value is
+   * invalid. Under some circumstances, swapFree in /proc/meminfo can
+   * go negative, reported as a very large decimal value.
+   */
+  private long safeParseLong(String strVal) {
+    long parsedVal;
+    try {
+      parsedVal = Long.parseLong(strVal);
+    } catch (NumberFormatException nfe) {
+      parsedVal = 0;
+    }
+    return parsedVal;
+  }
+  /**
    * Read /proc/meminfo, parse and compute memory information.
    * @param readAgain if false, read only on the first time
    */
@@ -219,9 +246,10 @@ public class SysInfoLinux extends SysInfo {
     InputStreamReader fReader;
     try {
       fReader = new InputStreamReader(
-          new FileInputStream(procfsMemFile), Charset.forName("UTF-8"));
+          Files.newInputStream(Paths.get(procfsMemFile)),
+          Charset.forName("UTF-8"));
       in = new BufferedReader(fReader);
-    } catch (FileNotFoundException f) {
+    } catch (IOException f) {
       // shouldn't happen....
       LOG.warn("Couldn't read " + procfsMemFile
           + "; can't determine memory settings");
@@ -240,11 +268,19 @@ public class SysInfoLinux extends SysInfo {
           } else if (mat.group(1).equals(SWAPTOTAL_STRING)) {
             swapSize = Long.parseLong(mat.group(2));
           } else if (mat.group(1).equals(MEMFREE_STRING)) {
-            ramSizeFree = Long.parseLong(mat.group(2));
+            ramSizeFree = safeParseLong(mat.group(2));
           } else if (mat.group(1).equals(SWAPFREE_STRING)) {
-            swapSizeFree = Long.parseLong(mat.group(2));
+            swapSizeFree = safeParseLong(mat.group(2));
           } else if (mat.group(1).equals(INACTIVE_STRING)) {
             inactiveSize = Long.parseLong(mat.group(2));
+          } else if (mat.group(1).equals(INACTIVEFILE_STRING)) {
+            inactiveFileSize = Long.parseLong(mat.group(2));
+          } else if (mat.group(1).equals(HARDWARECORRUPTED_STRING)) {
+            hardwareCorruptSize = Long.parseLong(mat.group(2));
+          } else if (mat.group(1).equals(HUGEPAGESTOTAL_STRING)) {
+            hugePagesTotal = Long.parseLong(mat.group(2));
+          } else if (mat.group(1).equals(HUGEPAGESIZE_STRING)) {
+            hugePageSize = Long.parseLong(mat.group(2));
           }
         }
         str = in.readLine();
@@ -281,10 +317,11 @@ public class SysInfoLinux extends SysInfo {
     BufferedReader in;
     InputStreamReader fReader;
     try {
-      fReader = new InputStreamReader(
-          new FileInputStream(procfsCpuFile), Charset.forName("UTF-8"));
+      fReader =
+          new InputStreamReader(Files.newInputStream(Paths.get(procfsCpuFile)),
+              Charset.forName("UTF-8"));
       in = new BufferedReader(fReader);
-    } catch (FileNotFoundException f) {
+    } catch (IOException f) {
       // shouldn't happen....
       LOG.warn("Couldn't read " + procfsCpuFile + "; can't determine cpu info");
       return;
@@ -342,9 +379,10 @@ public class SysInfoLinux extends SysInfo {
     InputStreamReader fReader;
     try {
       fReader = new InputStreamReader(
-          new FileInputStream(procfsStatFile), Charset.forName("UTF-8"));
+          Files.newInputStream(Paths.get(procfsStatFile)),
+          Charset.forName("UTF-8"));
       in = new BufferedReader(fReader);
-    } catch (FileNotFoundException f) {
+    } catch (IOException f) {
       // shouldn't happen....
       return;
     }
@@ -396,9 +434,10 @@ public class SysInfoLinux extends SysInfo {
     InputStreamReader fReader;
     try {
       fReader = new InputStreamReader(
-          new FileInputStream(procfsNetFile), Charset.forName("UTF-8"));
+          Files.newInputStream(Paths.get(procfsNetFile)),
+          Charset.forName("UTF-8"));
       in = new BufferedReader(fReader);
-    } catch (FileNotFoundException f) {
+    } catch (IOException f) {
       return;
     }
 
@@ -450,8 +489,9 @@ public class SysInfoLinux extends SysInfo {
     BufferedReader in;
     try {
       in = new BufferedReader(new InputStreamReader(
-            new FileInputStream(procfsDisksFile), Charset.forName("UTF-8")));
-    } catch (FileNotFoundException f) {
+          Files.newInputStream(Paths.get(procfsDisksFile)),
+          Charset.forName("UTF-8")));
+    } catch (IOException f) {
       return;
     }
 
@@ -517,9 +557,9 @@ public class SysInfoLinux extends SysInfo {
     BufferedReader in;
     try {
       in = new BufferedReader(new InputStreamReader(
-            new FileInputStream(procfsDiskSectorFile),
+          Files.newInputStream(Paths.get(procfsDiskSectorFile)),
               Charset.forName("UTF-8")));
-    } catch (FileNotFoundException f) {
+    } catch (IOException f) {
       return defSector;
     }
 
@@ -554,28 +594,31 @@ public class SysInfoLinux extends SysInfo {
   @Override
   public long getPhysicalMemorySize() {
     readProcMemInfoFile();
-    return ramSize * 1024;
+    return (ramSize
+            - hardwareCorruptSize
+            - (hugePagesTotal * hugePageSize)) * 1024;
   }
 
   /** {@inheritDoc} */
   @Override
   public long getVirtualMemorySize() {
-    readProcMemInfoFile();
-    return (ramSize + swapSize) * 1024;
+    return getPhysicalMemorySize() + (swapSize * 1024);
   }
 
   /** {@inheritDoc} */
   @Override
   public long getAvailablePhysicalMemorySize() {
     readProcMemInfoFile(true);
-    return (ramSizeFree + inactiveSize) * 1024;
+    long inactive = inactiveFileSize != -1
+        ? inactiveFileSize
+        : inactiveSize;
+    return (ramSizeFree + inactive) * 1024;
   }
 
   /** {@inheritDoc} */
   @Override
   public long getAvailableVirtualMemorySize() {
-    readProcMemInfoFile(true);
-    return (ramSizeFree + swapSizeFree + inactiveSize) * 1024;
+    return getAvailablePhysicalMemorySize() + (swapSizeFree * 1024);
   }
 
   /** {@inheritDoc} */

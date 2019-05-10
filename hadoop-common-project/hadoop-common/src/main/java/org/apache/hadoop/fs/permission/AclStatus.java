@@ -31,7 +31,7 @@ import com.google.common.collect.Lists;
  * instances are immutable. Use a {@link Builder} to create a new instance.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
+@InterfaceStability.Stable
 public class AclStatus {
   private final String owner;
   private final String group;
@@ -69,7 +69,7 @@ public class AclStatus {
   /**
    * Returns the list of all ACL entries, ordered by their natural ordering.
    *
-   * @return List<AclEntry> unmodifiable ordered list of all ACL entries
+   * @return List&lt;AclEntry&gt; unmodifiable ordered list of all ACL entries
    */
   public List<AclEntry> getEntries() {
     return entries;

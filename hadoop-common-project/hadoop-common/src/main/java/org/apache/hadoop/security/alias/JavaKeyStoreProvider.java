@@ -33,9 +33,9 @@ import java.net.URI;
 /**
  * CredentialProvider based on Java's KeyStore file format. The file may be
  * stored in any Hadoop FileSystem using the following name mangling:
- * jceks://hdfs@nn1.example.com/my/creds.jceks ->
- * hdfs://nn1.example.com/my/creds.jceks jceks://file/home/larry/creds.jceks ->
- * file:///home/larry/creds.jceks
+ * jceks://hdfs@nn1.example.com/my/creds.jceks {@literal ->}
+ * hdfs://nn1.example.com/my/creds.jceks jceks://file/home/larry/creds.jceks
+ * {@literal ->} file:///home/larry/creds.jceks
  */
 @InterfaceAudience.Private
 public class JavaKeyStoreProvider extends AbstractJavaKeyStoreProvider {
@@ -83,10 +83,10 @@ public class JavaKeyStoreProvider extends AbstractJavaKeyStoreProvider {
     permissions = s.getPermission();
   }
 
-  protected void initFileSystem(URI uri, Configuration conf)
+  protected void initFileSystem(URI uri)
       throws IOException {
-    super.initFileSystem(uri, conf);
-    fs = getPath().getFileSystem(conf);
+    super.initFileSystem(uri);
+    fs = getPath().getFileSystem(getConf());
   }
 
   /**

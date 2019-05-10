@@ -44,8 +44,11 @@ import org.apache.hadoop.fs.PathOperationException;
 import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.AclUtil;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.fs.viewfs.NotInMountpointException;
 import org.apache.hadoop.io.IOUtils;
 
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IO_FILE_BUFFER_SIZE_DEFAULT;
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IO_FILE_BUFFER_SIZE_KEY;
 import static org.apache.hadoop.fs.CreateFlag.CREATE;
 import static org.apache.hadoop.fs.CreateFlag.LAZY_PERSIST;
 
@@ -116,7 +119,7 @@ abstract class CommandWithDestination extends FsCommand {
     }
   }
   
-  protected static enum FileAttribute {
+  protected enum FileAttribute {
     TIMESTAMPS, OWNERSHIP, PERMISSION, ACL, XATTR;
 
     public static FileAttribute getAttribute(char symbol) {
@@ -442,8 +445,8 @@ abstract class CommandWithDestination extends FsCommand {
           src.stat.getPermission());
     }
     if (shouldPreserve(FileAttribute.ACL)) {
-      FsPermission perm = src.stat.getPermission();
-      if (perm.getAclBit()) {
+      if (src.stat.hasAcl()) {
+        FsPermission perm = src.stat.getPermission();
         List<AclEntry> srcEntries =
             src.fs.getAclStatus(src.path).getEntries();
         List<AclEntry> srcFullEntries =
@@ -492,14 +495,26 @@ abstract class CommandWithDestination extends FsCommand {
         throws IOException {
       try {
         if (lazyPersist) {
+          long defaultBlockSize;
+          try {
+            defaultBlockSize = getDefaultBlockSize();
+          } catch (NotInMountpointException ex) {
+            // ViewFileSystem#getDefaultBlockSize() throws an exception as it
+            // needs a target FS to retrive the default block size from.
+            // Hence, for ViewFs, we should call getDefaultBlockSize with the
+            // target path.
+            defaultBlockSize = getDefaultBlockSize(item.path);
+          }
+
           EnumSet<CreateFlag> createFlags = EnumSet.of(CREATE, LAZY_PERSIST);
           return create(item.path,
                         FsPermission.getFileDefault().applyUMask(
                             FsPermission.getUMask(getConf())),
                         createFlags,
-                        getConf().getInt("io.file.buffer.size", 4096),
-                        lazyPersist ? 1 : getDefaultReplication(item.path),
-                        getDefaultBlockSize(),
+                        getConf().getInt(IO_FILE_BUFFER_SIZE_KEY,
+                            IO_FILE_BUFFER_SIZE_DEFAULT),
+                        (short) 1,
+                        defaultBlockSize,
                         null,
                         null);
         } else {

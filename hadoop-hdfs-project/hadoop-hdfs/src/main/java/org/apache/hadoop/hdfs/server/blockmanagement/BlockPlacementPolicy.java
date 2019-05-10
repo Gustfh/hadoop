@@ -43,7 +43,7 @@ import org.slf4j.LoggerFactory;
  */
 @InterfaceAudience.Private
 public abstract class BlockPlacementPolicy {
-  static final Logger LOG = LoggerFactory.getLogger(
+  public static final Logger LOG = LoggerFactory.getLogger(
       BlockPlacementPolicy.class);
 
   @InterfaceAudience.Private
@@ -152,7 +152,6 @@ public abstract class BlockPlacementPolicy {
 
   /**
    * Check if the move is allowed. Used by balancer and other tools.
-   * @
    *
    * @param candidates all replicas including source and target
    * @param source source replica of the move

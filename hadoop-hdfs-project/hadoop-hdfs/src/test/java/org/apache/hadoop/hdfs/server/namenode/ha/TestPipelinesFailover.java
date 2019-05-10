@@ -25,10 +25,11 @@ import static org.junit.Assert.fail;
 import java.io.IOException;
 import java.security.PrivilegedExceptionAction;
 import java.util.Random;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
@@ -40,13 +41,12 @@ import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.MiniDFSNNTopology;
 import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
-import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocolPB.DatanodeProtocolClientSideTranslatorPB;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
-import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
+import org.apache.hadoop.hdfs.server.datanode.InternalDataNodeTestUtils;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.io.IOUtils;
@@ -69,12 +69,12 @@ import com.google.common.base.Supplier;
  */
 public class TestPipelinesFailover {
   static {
-    GenericTestUtils.setLogLevel(LogFactory.getLog(RetryInvocationHandler
-            .class), Level.ALL);
+    GenericTestUtils.setLogLevel(LoggerFactory.getLogger(RetryInvocationHandler
+            .class), org.slf4j.event.Level.DEBUG);
     DFSTestUtil.setNameNodeLogLevel(Level.ALL);
   }
   
-  protected static final Log LOG = LogFactory.getLog(
+  protected static final Logger LOG = LoggerFactory.getLogger(
       TestPipelinesFailover.class);
   private static final Path TEST_PATH =
     new Path("/test-file");
@@ -142,8 +142,9 @@ public class TestPipelinesFailover {
       MethodToTestIdempotence methodToTest) throws Exception {
     Configuration conf = new Configuration();
     conf.setInt(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, BLOCK_SIZE);
-    // Don't check replication periodically.
-    conf.setInt(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 1000);
+    // Don't check low redundancy periodically.
+    conf.setInt(DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_KEY,
+        1000);
     
     FSDataOutputStream stm = null;
     MiniDFSCluster cluster = newMiniCluster(conf, 3);
@@ -277,12 +278,13 @@ public class TestPipelinesFailover {
     // Disable permissions so that another user can recover the lease.
     conf.setBoolean(DFSConfigKeys.DFS_PERMISSIONS_ENABLED_KEY, false);
     conf.setInt(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, BLOCK_SIZE);
-    
+
     FSDataOutputStream stm = null;
     final MiniDFSCluster cluster = newMiniCluster(conf, 3);
     try {
       cluster.waitActive();
       cluster.transitionToActive(0);
+      cluster.setBlockRecoveryTimeout(TimeUnit.SECONDS.toMillis(1));
       Thread.sleep(500);
 
       LOG.info("Starting with NN 0 active");
@@ -358,18 +360,18 @@ public class TestPipelinesFailover {
       // active.
       DataNode primaryDN = cluster.getDataNode(expectedPrimary.getIpcPort());
       DatanodeProtocolClientSideTranslatorPB nnSpy =
-          DataNodeTestUtils.spyOnBposToNN(primaryDN, nn0);
-      
+          InternalDataNodeTestUtils.spyOnBposToNN(primaryDN, nn0);
+
       // Delay the commitBlockSynchronization call
       DelayAnswer delayer = new DelayAnswer(LOG);
       Mockito.doAnswer(delayer).when(nnSpy).commitBlockSynchronization(
           Mockito.eq(blk),
-          Mockito.anyInt(), // new genstamp
+          Mockito.anyLong(), // new genstamp
           Mockito.anyLong(), // new length
           Mockito.eq(true), // close file
           Mockito.eq(false), // delete block
-          (DatanodeID[]) Mockito.anyObject(), // new targets
-          (String[]) Mockito.anyObject()); // new target storages
+          Mockito.any(),  // new targets
+          Mockito.any()); // new target storages
 
       DistributedFileSystem fsOtherUser = createFsAsOtherUser(cluster, conf);
       assertFalse(fsOtherUser.recoverLease(TEST_PATH));

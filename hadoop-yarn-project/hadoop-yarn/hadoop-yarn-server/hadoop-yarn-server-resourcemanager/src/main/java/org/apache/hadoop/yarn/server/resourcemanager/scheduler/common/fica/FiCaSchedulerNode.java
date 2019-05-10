@@ -18,27 +18,30 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
-import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.nodelabels.CommonNodeLabelsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplicationAttempt;
+
+import org.apache.hadoop.yarn.server.scheduler.SchedulerRequestKey;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
 import org.apache.hadoop.yarn.util.resource.Resources;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 
 public class FiCaSchedulerNode extends SchedulerNode {
 
-  private static final Log LOG = LogFactory.getLog(FiCaSchedulerNode.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(FiCaSchedulerNode.class);
   private Map<ContainerId, RMContainer> killableContainers = new HashMap<>();
   private Resource totalKillableResources = Resource.newInstance(0, 0);
   
@@ -53,7 +56,7 @@ public class FiCaSchedulerNode extends SchedulerNode {
 
   @Override
   public synchronized void reserveResource(
-      SchedulerApplicationAttempt application, Priority priority,
+      SchedulerApplicationAttempt application, SchedulerRequestKey priority,
       RMContainer container) {
     // Check if it's already reserved
     RMContainer reservedContainer = getReservedContainer();
@@ -124,7 +127,7 @@ public class FiCaSchedulerNode extends SchedulerNode {
 
   // According to decisions from preemption policy, mark the container to killable
   public synchronized void markContainerToKillable(ContainerId containerId) {
-    RMContainer c = launchedContainers.get(containerId);
+    RMContainer c = getContainer(containerId);
     if (c != null && !killableContainers.containsKey(containerId)) {
       killableContainers.put(containerId, c);
       Resources.addTo(totalKillableResources, c.getAllocatedResource());
@@ -134,7 +137,7 @@ public class FiCaSchedulerNode extends SchedulerNode {
   // According to decisions from preemption policy, mark the container to
   // non-killable
   public synchronized void markContainerToNonKillable(ContainerId containerId) {
-    RMContainer c = launchedContainers.get(containerId);
+    RMContainer c = getContainer(containerId);
     if (c != null && killableContainers.containsKey(containerId)) {
       killableContainers.remove(containerId);
       Resources.subtractFrom(totalKillableResources, c.getAllocatedResource());
@@ -142,26 +145,12 @@ public class FiCaSchedulerNode extends SchedulerNode {
   }
 
   @Override
-  protected synchronized void updateResource(
+  protected synchronized void updateResourceForReleasedContainer(
       Container container) {
-    super.updateResource(container);
+    super.updateResourceForReleasedContainer(container);
     if (killableContainers.containsKey(container.getId())) {
       Resources.subtractFrom(totalKillableResources, container.getResource());
       killableContainers.remove(container.getId());
-    }
-  }
-
-  @Override
-  protected synchronized void changeContainerResource(ContainerId containerId,
-      Resource deltaResource, boolean increase) {
-    super.changeContainerResource(containerId, deltaResource, increase);
-
-    if (killableContainers.containsKey(containerId)) {
-      if (increase) {
-        Resources.addTo(totalKillableResources, deltaResource);
-      } else {
-        Resources.subtractFrom(totalKillableResources, deltaResource);
-      }
     }
   }
 
@@ -170,6 +159,19 @@ public class FiCaSchedulerNode extends SchedulerNode {
   }
 
   public synchronized Map<ContainerId, RMContainer> getKillableContainers() {
-    return killableContainers;
+    return Collections.unmodifiableMap(killableContainers);
   }
+
+  protected synchronized void allocateContainer(RMContainer rmContainer,
+      boolean launchedOnNode) {
+    super.allocateContainer(rmContainer, launchedOnNode);
+
+    final Container container = rmContainer.getContainer();
+    LOG.info("Assigned container " + container.getId() + " of capacity "
+          + container.getResource() + " on host " + getRMNode().getNodeAddress()
+          + ", which has " + getNumContainers() + " containers, "
+          + getAllocatedResource() + " used and " + getUnallocatedResource()
+          + " available after allocation");
+  }
+
 }

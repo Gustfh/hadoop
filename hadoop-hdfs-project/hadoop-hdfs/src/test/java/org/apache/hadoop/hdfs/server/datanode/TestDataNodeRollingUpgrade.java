@@ -27,8 +27,8 @@ import java.util.Random;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSClient;
@@ -49,13 +49,15 @@ import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.tools.DFSAdmin;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.junit.Test;
+import org.mockito.Mockito;
 
 /**
  * Ensure that the DataNode correctly handles rolling upgrade
  * finalize and rollback.
  */
 public class TestDataNodeRollingUpgrade {
-  private static final Log LOG = LogFactory.getLog(TestDataNodeRollingUpgrade.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestDataNodeRollingUpgrade.class);
 
   private static final short REPL_FACTOR = 1;
   private static final int BLOCK_SIZE = 1024 * 1024;
@@ -114,8 +116,11 @@ public class TestDataNodeRollingUpgrade {
   }
 
   private File getTrashFileForBlock(File blockFile, boolean exists) {
+
+    ReplicaInfo info = Mockito.mock(ReplicaInfo.class);
+    Mockito.when(info.getBlockURI()).thenReturn(blockFile.toURI());
     File trashFile = new File(
-        dn0.getStorage().getTrashDirectoryForBlockFile(blockPoolId, blockFile));
+        dn0.getStorage().getTrashDirectoryForReplica(blockPoolId, info));
     assertEquals(exists, trashFile.exists());
     return trashFile;
   }

@@ -18,6 +18,7 @@
 package org.apache.hadoop.hdfs.server.balancer;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static org.apache.hadoop.hdfs.protocol.BlockType.CONTIGUOUS;
 
 import java.io.IOException;
 import java.io.PrintStream;
@@ -33,9 +34,10 @@ import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
@@ -76,7 +78,7 @@ import com.google.common.base.Preconditions;
  * <p>SYNOPSIS
  * <pre>
  * To start:
- *      bin/start-balancer.sh [-threshold <threshold>]
+ *      bin/start-balancer.sh [-threshold {@literal <threshold>}]
  *      Example: bin/ start-balancer.sh 
  *                     start the balancer with a default threshold of 10%
  *               bin/ start-balancer.sh -threshold 5
@@ -111,13 +113,14 @@ import com.google.common.base.Preconditions;
  * <p>A system property that limits the balancer's use of bandwidth is 
  * defined in the default configuration file:
  * <pre>
- * <property>
- *   <name>dfs.balance.bandwidthPerSec</name>
- *   <value>1048576</value>
- * <description>  Specifies the maximum bandwidth that each datanode 
+ * &lt;property&gt;
+ *   &lt;name&gt;dfs.datanode.balance.bandwidthPerSec&lt;/name&gt;
+ *   &lt;value&gt;1048576&lt;/value&gt;
+ * &lt;description&gt;  Specifies the maximum bandwidth that each datanode
  * can utilize for the balancing purpose in term of the number of bytes 
- * per second. </description>
- * </property>
+ * per second.
+ * &lt;/description&gt;
+ * &lt;/property&gt;
  * </pre>
  * 
  * <p>This property determines the maximum speed at which a block will be 
@@ -170,7 +173,7 @@ import com.google.common.base.Preconditions;
 
 @InterfaceAudience.Private
 public class Balancer {
-  static final Log LOG = LogFactory.getLog(Balancer.class);
+  static final Logger LOG = LoggerFactory.getLogger(Balancer.class);
 
   static final Path BALANCER_ID_PATH = new Path("/system/balancer.id");
 
@@ -219,7 +222,7 @@ public class Balancer {
       ) throws UnsupportedActionException {
     BlockPlacementPolicies placementPolicies =
         new BlockPlacementPolicies(conf, null, null, null);
-    if (!(placementPolicies.getPolicy(false) instanceof
+    if (!(placementPolicies.getPolicy(CONTIGUOUS) instanceof
         BlockPlacementPolicyDefault)) {
       throw new UnsupportedActionException(
           "Balancer without BlockPlacementPolicyDefault");
@@ -281,13 +284,23 @@ public class Balancer {
     final long getBlocksMinBlockSize = getLongBytes(conf,
         DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_KEY,
         DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_DEFAULT);
+    final int blockMoveTimeout = conf.getInt(
+        DFSConfigKeys.DFS_BALANCER_BLOCK_MOVE_TIMEOUT,
+        DFSConfigKeys.DFS_BALANCER_BLOCK_MOVE_TIMEOUT_DEFAULT);
+    final int maxNoMoveInterval = conf.getInt(
+        DFSConfigKeys.DFS_BALANCER_MAX_NO_MOVE_INTERVAL_KEY,
+        DFSConfigKeys.DFS_BALANCER_MAX_NO_MOVE_INTERVAL_DEFAULT);
+    final long maxIterationTime = conf.getLong(
+        DFSConfigKeys.DFS_BALANCER_MAX_ITERATION_TIME_KEY,
+        DFSConfigKeys.DFS_BALANCER_MAX_ITERATION_TIME_DEFAULT);
 
     this.nnc = theblockpool;
     this.dispatcher =
         new Dispatcher(theblockpool, p.getIncludedNodes(),
             p.getExcludedNodes(), movedWinWidth, moverThreads,
             dispatcherThreads, maxConcurrentMovesPerNode, getBlocksSize,
-            getBlocksMinBlockSize, conf);
+            getBlocksMinBlockSize, blockMoveTimeout, maxNoMoveInterval,
+            maxIterationTime, conf);
     this.threshold = p.getThreshold();
     this.policy = p.getBalancingPolicy();
     this.sourceNodes = p.getSourceNodes();
@@ -609,6 +622,8 @@ public class Balancer {
       if (!runDuringUpgrade && nnc.isUpgrading()) {
         System.err.println("Balancer exiting as upgrade is not finalized, "
             + "please finalize the HDFS upgrade before running the balancer.");
+        LOG.error("Balancer exiting as upgrade is not finalized, "
+            + "please finalize the HDFS upgrade before running the balancer.");
         return newResult(ExitStatus.UNFINALIZED_UPGRADE, bytesLeftToMove, -1);
       }
 
@@ -660,10 +675,13 @@ public class Balancer {
   static int run(Collection<URI> namenodes, final BalancerParameters p,
       Configuration conf) throws IOException, InterruptedException {
     final long sleeptime =
-        conf.getLong(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY,
-            DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_DEFAULT) * 2000 +
-        conf.getLong(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY,
-            DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_DEFAULT) * 1000;
+        conf.getTimeDuration(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY,
+            DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_DEFAULT,
+            TimeUnit.SECONDS, TimeUnit.MILLISECONDS) * 2 +
+        conf.getTimeDuration(
+            DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_KEY,
+            DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_DEFAULT,
+            TimeUnit.SECONDS, TimeUnit.MILLISECONDS);
     LOG.info("namenodes  = " + namenodes);
     LOG.info("parameters = " + p);
     LOG.info("included nodes = " + p.getIncludedNodes());
@@ -707,7 +725,7 @@ public class Balancer {
       }
     } finally {
       for(NameNodeConnector nnc : connectors) {
-        IOUtils.cleanup(LOG, nnc);
+        IOUtils.cleanupWithLogger(LOG, nnc);
       }
     }
     return ExitStatus.SUCCESS.getExitCode();
@@ -764,7 +782,7 @@ public class Balancer {
       try {
         checkReplicationPolicyCompatibility(conf);
 
-        final Collection<URI> namenodes = DFSUtil.getNsServiceRpcUris(conf);
+        final Collection<URI> namenodes = DFSUtil.getInternalNsRpcUris(conf);
         return Balancer.run(namenodes, parse(args), conf);
       } catch (IOException e) {
         System.out.println(e + ".  Exiting ...");

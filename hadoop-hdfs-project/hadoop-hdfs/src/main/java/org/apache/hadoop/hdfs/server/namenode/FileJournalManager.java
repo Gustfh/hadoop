@@ -17,8 +17,8 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
@@ -60,7 +60,8 @@ import com.google.common.collect.ComparisonChain;
  */
 @InterfaceAudience.Private
 public class FileJournalManager implements JournalManager {
-  private static final Log LOG = LogFactory.getLog(FileJournalManager.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(FileJournalManager.class);
 
   private final Configuration conf;
   private final StorageDirectory sd;
@@ -100,7 +101,7 @@ public class FileJournalManager implements JournalManager {
   public void close() throws IOException {}
   
   @Override
-  public void format(NamespaceInfo ns) throws IOException {
+  public void format(NamespaceInfo ns, boolean force) throws IOException {
     // Formatting file journals is done by the StorageDirectory
     // format code, since they may share their directory with
     // checkpoints, etc.
@@ -333,10 +334,17 @@ public class FileJournalManager implements JournalManager {
     return ret;
   }
 
+  synchronized public void selectInputStreams(
+      Collection<EditLogInputStream> streams,
+      long fromTxnId, boolean inProgressOk) throws IOException {
+    selectInputStreams(streams, fromTxnId, inProgressOk, false);
+  }
+
   @Override
   synchronized public void selectInputStreams(
       Collection<EditLogInputStream> streams, long fromTxId,
-      boolean inProgressOk) throws IOException {
+      boolean inProgressOk, boolean onlyDurableTxns)
+      throws IOException {
     List<EditLogFile> elfs = matchEditLogs(sd.getCurrentDir());
     if (LOG.isDebugEnabled()) {
       LOG.debug(this + ": selecting input streams starting at " + fromTxId +
@@ -444,16 +452,28 @@ public class FileJournalManager implements JournalManager {
   }
   
   public EditLogFile getLogFile(long startTxId) throws IOException {
-    return getLogFile(sd.getCurrentDir(), startTxId);
+    return getLogFile(sd.getCurrentDir(), startTxId, true);
   }
-  
+
+  public EditLogFile getLogFile(long startTxId, boolean inProgressOk)
+      throws IOException {
+    return getLogFile(sd.getCurrentDir(), startTxId, inProgressOk);
+  }
+
   public static EditLogFile getLogFile(File dir, long startTxId)
       throws IOException {
+    return getLogFile(dir, startTxId, true);
+  }
+
+  public static EditLogFile getLogFile(File dir, long startTxId,
+      boolean inProgressOk) throws IOException {
     List<EditLogFile> files = matchEditLogs(dir);
     List<EditLogFile> ret = Lists.newLinkedList();
     for (EditLogFile elf : files) {
       if (elf.getFirstTxId() == startTxId) {
-        ret.add(elf);
+        if (inProgressOk || !elf.isInProgress()) {
+          ret.add(elf);
+        }
       }
     }
     

@@ -50,6 +50,7 @@ service ApplicationClientProtocolService {
   rpc getApplicationAttempts (GetApplicationAttemptsRequestProto) returns (GetApplicationAttemptsResponseProto);
   rpc getContainerReport (GetContainerReportRequestProto) returns (GetContainerReportResponseProto);
   rpc getContainers (GetContainersRequestProto) returns (GetContainersResponseProto);
+  rpc getNewReservation (GetNewReservationRequestProto) returns (GetNewReservationResponseProto);
   rpc submitReservation (ReservationSubmissionRequestProto) returns (ReservationSubmissionResponseProto);
   rpc updateReservation (ReservationUpdateRequestProto) returns (ReservationUpdateResponseProto);
   rpc deleteReservation (ReservationDeleteRequestProto) returns (ReservationDeleteResponseProto);
@@ -58,5 +59,12 @@ service ApplicationClientProtocolService {
   rpc getLabelsToNodes (GetLabelsToNodesRequestProto) returns (GetLabelsToNodesResponseProto);
   rpc getClusterNodeLabels (GetClusterNodeLabelsRequestProto) returns (GetClusterNodeLabelsResponseProto);
   rpc updateApplicationPriority (UpdateApplicationPriorityRequestProto) returns (UpdateApplicationPriorityResponseProto);
-  rpc signalContainer(SignalContainerRequestProto) returns (SignalContainerResponseProto);
+  rpc signalToContainer(SignalContainerRequestProto) returns (SignalContainerResponseProto);
+  rpc updateApplicationTimeouts (UpdateApplicationTimeoutsRequestProto) returns (UpdateApplicationTimeoutsResponseProto);
+  rpc getResourceProfiles(GetAllResourceProfilesRequestProto) returns (GetAllResourceProfilesResponseProto);
+  rpc getResourceProfile(GetResourceProfileRequestProto) returns (GetResourceProfileResponseProto);
+  rpc getResourceTypeInfo(GetAllResourceTypeInfoRequestProto) returns (GetAllResourceTypeInfoResponseProto);
+  rpc getClusterNodeAttributes (GetClusterNodeAttributesRequestProto) returns (GetClusterNodeAttributesResponseProto);
+  rpc getAttributesToNodes (GetAttributesToNodesRequestProto) returns (GetAttributesToNodesResponseProto);
+  rpc getNodesToAttributes (GetNodesToAttributesRequestProto) returns (GetNodesToAttributesResponseProto);
 }

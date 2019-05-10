@@ -28,21 +28,21 @@ import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NamenodeRole;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.test.Whitebox;
 
 import org.junit.Before;
 import org.junit.Test;
-
-import org.mockito.internal.util.reflection.Whitebox;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.util.concurrent.TimeoutException;
 
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SAFEMODE_EXTENSION_DEFAULT;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
-import static org.mockito.Matchers.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
@@ -237,15 +237,7 @@ public class TestBlockManagerSafeMode {
       BlockInfo blockInfo = mock(BlockInfo.class);
       doReturn(false).when(blockInfo).isStriped();
       bmSafeMode.incrementSafeBlockCount(1, blockInfo);
-      if (i < BLOCK_THRESHOLD) {
-        assertEquals(i, getblockSafe());
-        assertTrue(bmSafeMode.isInSafeMode());
-      } else {
-        // block manager leaves safe mode if block threshold is met
-        assertFalse(bmSafeMode.isInSafeMode());
-        // the increment will be a no-op if safe mode is OFF
-        assertEquals(BLOCK_THRESHOLD, getblockSafe());
-      }
+      assertSafeModeIsLeftAtThreshold(i);
     }
   }
 
@@ -314,14 +306,35 @@ public class TestBlockManagerSafeMode {
       bmSafeMode.decrementSafeBlockCount(blockInfo);
       bmSafeMode.incrementSafeBlockCount(1, blockInfo);
 
-      if (i < BLOCK_THRESHOLD) {
-        assertEquals(i, getblockSafe());
-        assertTrue(bmSafeMode.isInSafeMode());
-      } else {
-        // block manager leaves safe mode if block threshold is met
-        assertEquals(BLOCK_THRESHOLD, getblockSafe());
-        assertFalse(bmSafeMode.isInSafeMode());
-      }
+      assertSafeModeIsLeftAtThreshold(i);
+    }
+  }
+
+  /**
+   * Test when the block safe increment and decrement interleave
+   * for striped blocks.
+   *
+   * Both the increment and decrement will be a no-op if the safe mode is OFF.
+   * The safe mode status lifecycle: OFF -> PENDING_THRESHOLD -> OFF
+   */
+  @Test(timeout = 30000)
+  public void testIncrementAndDecrementStripedSafeBlockCount() {
+    bmSafeMode.activate(BLOCK_TOTAL);
+    Whitebox.setInternalState(bmSafeMode, "extension", 0);
+
+    // this number is used only by the decrementSafeBlockCount method
+    final int liveReplicasWhenDecrementing = 1;
+    final short realDataBlockNum = 2;
+    mockBlockManagerForStripedBlockSafeDecrement(liveReplicasWhenDecrementing);
+    for (long i = 1; i <= BLOCK_TOTAL; i++) {
+      BlockInfoStriped blockInfo = mock(BlockInfoStriped.class);
+      when(blockInfo.getRealDataBlockNum()).thenReturn(realDataBlockNum);
+
+      bmSafeMode.incrementSafeBlockCount(realDataBlockNum, blockInfo);
+      bmSafeMode.decrementSafeBlockCount(blockInfo);
+      bmSafeMode.incrementSafeBlockCount(realDataBlockNum, blockInfo);
+
+      assertSafeModeIsLeftAtThreshold(i);
     }
   }
 
@@ -390,6 +403,25 @@ public class TestBlockManagerSafeMode {
         "after leaving safe mode", 0L, bmSafeMode.getBytesInFuture());
     assertTrue("Leaving safe mode should succeed after blocks with future GS " +
         "are cleared.", bmSafeMode.leaveSafeMode(false));
+  }
+
+  @Test(timeout = 10000)
+  public void testExtensionConfig() {
+    final Configuration conf = new HdfsConfiguration();
+    bmSafeMode = new BlockManagerSafeMode(bm, fsn, false, conf);
+    assertEquals(DFS_NAMENODE_SAFEMODE_EXTENSION_DEFAULT, bmSafeMode.extension);
+
+    conf.set(DFSConfigKeys.DFS_NAMENODE_SAFEMODE_EXTENSION_KEY, "30000");
+    bmSafeMode = new BlockManagerSafeMode(bm, fsn, false, conf);
+    assertEquals(30000, bmSafeMode.extension);
+
+    conf.set(DFSConfigKeys.DFS_NAMENODE_SAFEMODE_EXTENSION_KEY, "20s");
+    bmSafeMode = new BlockManagerSafeMode(bm, fsn, false, conf);
+    assertEquals(20 * 1000, bmSafeMode.extension);
+
+    conf.set(DFSConfigKeys.DFS_NAMENODE_SAFEMODE_EXTENSION_KEY, "7m");
+    bmSafeMode = new BlockManagerSafeMode(bm, fsn, false, conf);
+    assertEquals(7 * 60 * 1000, bmSafeMode.extension);
   }
 
   /**
@@ -489,10 +521,27 @@ public class TestBlockManagerSafeMode {
    */
   private void mockBlockManagerForBlockSafeDecrement() {
     BlockInfo storedBlock = mock(BlockInfo.class);
+    mockBlockManagerForBlockSafeDecrement(storedBlock, 0);
+  }
+
+  /**
+   * Mock block manager internal state for decrement safe block
+   * in case of striped block.
+   */
+  private void mockBlockManagerForStripedBlockSafeDecrement(int liveReplicas) {
+    BlockInfo storedBlock = mock(BlockInfoStriped.class);
+    mockBlockManagerForBlockSafeDecrement(storedBlock, liveReplicas);
+  }
+
+  /**
+   * Mock block manager internal state for decrement safe block.
+   */
+  private void mockBlockManagerForBlockSafeDecrement(BlockInfo storedBlock,
+        int liveReplicas) {
     when(storedBlock.isComplete()).thenReturn(true);
     doReturn(storedBlock).when(bm).getStoredBlock(any(Block.class));
     NumberReplicas numberReplicas = mock(NumberReplicas.class);
-    when(numberReplicas.liveReplicas()).thenReturn(0);
+    when(numberReplicas.liveReplicas()).thenReturn(liveReplicas);
     doReturn(numberReplicas).when(bm).countNodes(any(BlockInfo.class));
   }
 
@@ -532,5 +581,20 @@ public class TestBlockManagerSafeMode {
 
   private long getblockSafe() {
     return (long)Whitebox.getInternalState(bmSafeMode, "blockSafe");
+  }
+
+  private void assertSafeModeIsLeftAtThreshold(long blockIndex) {
+    if (blockIndex < BLOCK_THRESHOLD) {
+      assertEquals("Current block index should be equal to " +
+          "the safe block counter.", blockIndex, getblockSafe());
+      assertTrue("Block Manager should stay in safe mode until " +
+          "the safe block threshold is reached.", bmSafeMode.isInSafeMode());
+    } else {
+      assertEquals("If safe block threshold is reached, safe block " +
+          "counter should not increase further.",
+          BLOCK_THRESHOLD, getblockSafe());
+      assertFalse("Block manager leaves safe mode if block " +
+          "threshold is met.", bmSafeMode.isInSafeMode());
+    }
   }
 }

@@ -20,9 +20,11 @@ package org.apache.hadoop.crypto.key;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
+import java.nio.charset.StandardCharsets;
 import java.security.NoSuchAlgorithmException;
 import java.util.Collections;
 import java.util.Date;
@@ -32,30 +34,44 @@ import java.util.Map;
 
 import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonWriter;
-import org.apache.commons.io.Charsets;
+import org.apache.commons.lang3.builder.EqualsBuilder;
+import org.apache.commons.lang3.builder.HashCodeBuilder;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 
 import javax.crypto.KeyGenerator;
+
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_SECURITY_CRYPTO_JCEKS_KEY_SERIALFILTER;
 
 /**
  * A provider of secret key material for Hadoop applications. Provides an
  * abstraction to separate key storage from users of encryption. It
  * is intended to support getting or storing keys in a variety of ways,
  * including third party bindings.
- * <P/>
+ * <p>
  * <code>KeyProvider</code> implementations must be thread safe.
  */
 @InterfaceAudience.Public
 @InterfaceStability.Unstable
-public abstract class KeyProvider {
+public abstract class KeyProvider implements Closeable {
   public static final String DEFAULT_CIPHER_NAME =
-      "hadoop.security.key.default.cipher";
-  public static final String DEFAULT_CIPHER = "AES/CTR/NoPadding";
+      CommonConfigurationKeysPublic.HADOOP_SECURITY_KEY_DEFAULT_CIPHER_KEY;
+  public static final String DEFAULT_CIPHER =
+      CommonConfigurationKeysPublic.HADOOP_SECURITY_KEY_DEFAULT_CIPHER_DEFAULT;
   public static final String DEFAULT_BITLENGTH_NAME =
-      "hadoop.security.key.default.bitlength";
-  public static final int DEFAULT_BITLENGTH = 128;
+      CommonConfigurationKeysPublic.HADOOP_SECURITY_KEY_DEFAULT_BITLENGTH_KEY;
+  public static final int DEFAULT_BITLENGTH = CommonConfigurationKeysPublic.
+      HADOOP_SECURITY_KEY_DEFAULT_BITLENGTH_DEFAULT;
+  public static final String JCEKS_KEY_SERIALFILTER_DEFAULT =
+      "java.lang.Enum;"
+          + "java.security.KeyRep;"
+          + "java.security.KeyRep$Type;"
+          + "javax.crypto.spec.SecretKeySpec;"
+          + "org.apache.hadoop.crypto.key.JavaKeyStoreProvider$KeyMetadata;"
+          + "!*";
+  public static final String JCEKS_KEY_SERIAL_FILTER = "jceks.key.serialFilter";
 
   private final Configuration conf;
 
@@ -69,8 +85,8 @@ public abstract class KeyProvider {
 
     protected KeyVersion(String name, String versionName,
                          byte[] material) {
-      this.name = name;
-      this.versionName = versionName;
+      this.name = name == null ? null : name.intern();
+      this.versionName = versionName == null ? null : versionName.intern();
       this.material = material;
     }
     
@@ -86,6 +102,7 @@ public abstract class KeyProvider {
       return material;
     }
 
+    @Override
     public String toString() {
       StringBuilder buf = new StringBuilder();
       buf.append("key(");
@@ -104,6 +121,31 @@ public abstract class KeyProvider {
         }
       }
       return buf.toString();
+    }
+
+    @Override
+    public boolean equals(Object rhs) {
+      if (this == rhs) {
+        return true;
+      }
+      if (rhs == null || getClass() != rhs.getClass()) {
+        return false;
+      }
+      final KeyVersion kv = (KeyVersion) rhs;
+      return new EqualsBuilder().
+          append(name, kv.name).
+          append(versionName, kv.versionName).
+          append(material, kv.material).
+          isEquals();
+    }
+
+    @Override
+    public int hashCode() {
+      return new HashCodeBuilder().
+          append(name).
+          append(versionName).
+          append(material).
+          toHashCode();
     }
   }
 
@@ -171,9 +213,8 @@ public abstract class KeyProvider {
       return cipher;
     }
 
-    @SuppressWarnings("unchecked")
     public Map<String, String> getAttributes() {
-      return (attributes == null) ? Collections.EMPTY_MAP : attributes;
+      return (attributes == null) ? Collections.emptyMap() : attributes;
     }
 
     /**
@@ -209,7 +250,7 @@ public abstract class KeyProvider {
     protected byte[] serialize() throws IOException {
       ByteArrayOutputStream buffer = new ByteArrayOutputStream();
       JsonWriter writer = new JsonWriter(
-          new OutputStreamWriter(buffer, Charsets.UTF_8));
+          new OutputStreamWriter(buffer, StandardCharsets.UTF_8));
       try {
         writer.beginObject();
         if (cipher != null) {
@@ -252,8 +293,9 @@ public abstract class KeyProvider {
       int versions = 0;
       String description = null;
       Map<String, String> attributes = null;
-      JsonReader reader = new JsonReader(new InputStreamReader
-        (new ByteArrayInputStream(bytes), Charsets.UTF_8));
+      JsonReader reader =
+          new JsonReader(new InputStreamReader(new ByteArrayInputStream(bytes),
+              StandardCharsets.UTF_8));
       try {
         reader.beginObject();
         while (reader.hasNext()) {
@@ -341,9 +383,8 @@ public abstract class KeyProvider {
       return description;
     }
 
-    @SuppressWarnings("unchecked")
     public Map<String, String> getAttributes() {
-      return (attributes == null) ? Collections.EMPTY_MAP : attributes;
+      return (attributes == null) ? Collections.emptyMap() : attributes;
     }
 
     @Override
@@ -364,6 +405,14 @@ public abstract class KeyProvider {
    */
   public KeyProvider(Configuration conf) {
     this.conf = new Configuration(conf);
+    // Added for HADOOP-15473. Configured serialFilter property fixes
+    // java.security.UnrecoverableKeyException in JDK 8u171.
+    if(System.getProperty(JCEKS_KEY_SERIAL_FILTER) == null) {
+      String serialFilter =
+          conf.get(HADOOP_SECURITY_CRYPTO_JCEKS_KEY_SERIALFILTER,
+              JCEKS_KEY_SERIALFILTER_DEFAULT);
+      System.setProperty(JCEKS_KEY_SERIAL_FILTER, serialFilter);
+    }
   }
 
   /**
@@ -501,7 +550,7 @@ public abstract class KeyProvider {
   /**
    * Create a new key generating the material for it.
    * The given key must not already exist.
-   * <p/>
+   * <p>
    * This implementation generates the key material and calls the
    * {@link #createKey(String, byte[], Options)} method.
    *
@@ -545,7 +594,7 @@ public abstract class KeyProvider {
 
   /**
    * Roll a new version of the given key generating the material for it.
-   * <p/>
+   * <p>
    * This implementation generates the key material and calls the
    * {@link #rollNewVersion(String, byte[])} method.
    *
@@ -556,8 +605,24 @@ public abstract class KeyProvider {
   public KeyVersion rollNewVersion(String name) throws NoSuchAlgorithmException,
                                                        IOException {
     Metadata meta = getMetadata(name);
+    if (meta == null) {
+      throw new IOException("Can't find Metadata for key " + name);
+    }
+
     byte[] material = generateKey(meta.getBitLength(), meta.getCipher());
     return rollNewVersion(name, material);
+  }
+
+  /**
+   * Can be used by implementing classes to invalidate the caches. This could be
+   * used after rollNewVersion to provide a strong guarantee to return the new
+   * version of the given key.
+   *
+   * @param name the basename of the key
+   * @throws IOException
+   */
+  public void invalidateCache(String name) throws IOException {
+    // NOP
   }
 
   /**
@@ -606,5 +671,37 @@ public abstract class KeyProvider {
       }
     }
     throw new IOException("Can't find KeyProvider for key " + keyName);
+  }
+
+  /**
+   * Does this provider require a password? This means that a password is
+   * required for normal operation, and it has not been found through normal
+   * means. If true, the password should be provided by the caller using
+   * setPassword().
+   * @return Whether or not the provider requires a password
+   * @throws IOException
+   */
+  public boolean needsPassword() throws IOException {
+    return false;
+  }
+
+  /**
+   * If a password for the provider is needed, but is not provided, this will
+   * return a warning and instructions for supplying said password to the
+   * provider.
+   * @return A warning and instructions for supplying the password
+   */
+  public String noPasswordWarning() {
+    return null;
+  }
+
+  /**
+   * If a password for the provider is needed, but is not provided, this will
+   * return an error message and instructions for supplying said password to
+   * the provider.
+   * @return An error message and instructions for supplying the password
+   */
+  public String noPasswordError() {
+    return null;
   }
 }

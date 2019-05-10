@@ -22,11 +22,9 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
-import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 import org.apache.hadoop.hdfs.protocol.datatransfer.PacketHeader;
 import org.apache.hadoop.hdfs.server.datanode.CachingStrategy;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
-import org.apache.hadoop.hdfs.server.protocol.BlockECReconstructionCommand.BlockECReconstructionInfo;
 import org.apache.hadoop.util.DataChecksum;
 import org.slf4j.Logger;
 
@@ -57,7 +55,7 @@ class StripedWriter {
   private final short[] targetIndices;
   private boolean hasValidTargets;
   private final StorageType[] targetStorageTypes;
-  private long maxTargetLength;
+  private final String[] targetStorageIds;
 
   private StripedBlockWriter[] writers;
 
@@ -67,20 +65,21 @@ class StripedWriter {
   private int bytesPerChecksum;
   private int checksumSize;
 
-  StripedWriter(StripedReconstructor reconstructor,
-                DataNode datanode,
-                Configuration conf,
-                BlockECReconstructionInfo reconstructionInfo) {
+  StripedWriter(StripedReconstructor reconstructor, DataNode datanode,
+      Configuration conf, StripedReconstructionInfo stripedReconInfo) {
     this.reconstructor = reconstructor;
     this.datanode = datanode;
     this.conf = conf;
 
-    ErasureCodingPolicy ecPolicy = reconstructionInfo.getErasureCodingPolicy();
-    dataBlkNum = ecPolicy.getNumDataUnits();
-    parityBlkNum = ecPolicy.getNumParityUnits();
+    dataBlkNum = stripedReconInfo.getEcPolicy().getNumDataUnits();
+    parityBlkNum = stripedReconInfo.getEcPolicy().getNumParityUnits();
 
-    targets = reconstructionInfo.getTargetDnInfos();
-    targetStorageTypes = reconstructionInfo.getTargetStorageTypes();
+    this.targets = stripedReconInfo.getTargets();
+    assert targets != null;
+    this.targetStorageTypes = stripedReconInfo.getTargetStorageTypes();
+    assert targetStorageTypes != null;
+    this.targetStorageIds = stripedReconInfo.getTargetStorageIds();
+    assert targetStorageIds != null;
 
     writers = new StripedBlockWriter[targets.length];
 
@@ -88,12 +87,12 @@ class StripedWriter {
     Preconditions.checkArgument(targetIndices.length <= parityBlkNum,
         "Too much missed striped blocks.");
     initTargetIndices();
-
-    maxTargetLength = 0L;
+    long maxTargetLength = 0L;
     for (short targetIndex : targetIndices) {
       maxTargetLength = Math.max(maxTargetLength,
           reconstructor.getBlockLen(targetIndex));
     }
+    reconstructor.setMaxTargetLength(maxTargetLength);
 
     // targetsStatus store whether some target is success, it will record
     // any failed target once, if some target failed (invalid DN or transfer
@@ -126,7 +125,6 @@ class StripedWriter {
     BitSet bitset = reconstructor.getLiveBitSet();
 
     int m = 0;
-    int k = 0;
     hasValidTargets = false;
     for (int i = 0; i < dataBlkNum + parityBlkNum; i++) {
       if (!bitset.get(i)) {
@@ -197,7 +195,7 @@ class StripedWriter {
   private StripedBlockWriter createWriter(short index) throws IOException {
     return new StripedBlockWriter(this, datanode, conf,
         reconstructor.getBlock(targetIndices[index]), targets[index],
-        targetStorageTypes[index]);
+        targetStorageTypes[index], targetStorageIds[index]);
   }
 
   ByteBuffer allocateWriteBuffer() {
@@ -257,10 +255,6 @@ class StripedWriter {
     }
   }
 
-  long getMaxTargetLength() {
-    return maxTargetLength;
-  }
-
   byte[] getChecksumBuf() {
     return checksumBuf;
   }
@@ -289,6 +283,10 @@ class StripedWriter {
     return reconstructor.getSocketAddress4Transfer(target);
   }
 
+  StripedReconstructor getReconstructor() {
+    return reconstructor;
+  }
+
   boolean hasValidTargets() {
     return hasValidTargets;
   }
@@ -306,6 +304,14 @@ class StripedWriter {
   }
 
   void close() {
+    for (StripedBlockWriter writer : writers) {
+      ByteBuffer targetBuffer = writer.getTargetBuffer();
+      if (targetBuffer != null) {
+        reconstructor.freeBuffer(targetBuffer);
+        writer.freeTargetBuffer();
+      }
+    }
+
     for (int i = 0; i < targets.length; i++) {
       writers[i].close();
     }

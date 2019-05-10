@@ -50,9 +50,7 @@ public class StatisticsEditsVisitor implements OfflineEditsVisitor {
    * Create a processor that writes to the file named and may or may not
    * also output to the screen, as specified.
    *
-   * @param filename Name of file to write output to
-   * @param tokenizer Input tokenizer
-   * @param printToScreen Mirror output to screen?
+   * @param out Name of file to write output to
    */
   public StatisticsEditsVisitor(OutputStream out) throws IOException {
     this.out = new PrintWriter(new OutputStreamWriter(out, Charsets.UTF_8));
@@ -107,16 +105,17 @@ public class StatisticsEditsVisitor implements OfflineEditsVisitor {
    * @return statistics in in string format, suitable for printing
    */
   public String getStatisticsString() {
-    StringBuffer sb = new StringBuffer();
+    StringBuilder sb = new StringBuilder();
     sb.append(String.format(
         "    %-30.30s      : %d%n",
         "VERSION", version));
     for(FSEditLogOpCodes opCode : FSEditLogOpCodes.values()) {
+      Long count = opCodeCount.get(opCode);
       sb.append(String.format(
-        "    %-30.30s (%3d): %d%n",
-        opCode.toString(),
-        opCode.getOpCode(),
-        opCodeCount.get(opCode)));
+          "    %-30.30s (%3d): %d%n",
+          opCode.toString(),
+          opCode.getOpCode(),
+          count == null ? Long.valueOf(0L) : count));
     }
     return sb.toString();
   }

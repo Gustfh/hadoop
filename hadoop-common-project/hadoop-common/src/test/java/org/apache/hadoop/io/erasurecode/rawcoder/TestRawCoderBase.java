@@ -18,18 +18,20 @@
 package org.apache.hadoop.io.erasurecode.rawcoder;
 
 import org.apache.hadoop.io.erasurecode.ECChunk;
+import org.apache.hadoop.io.erasurecode.ErasureCoderOptions;
 import org.apache.hadoop.io.erasurecode.TestCoderBase;
+import org.apache.hadoop.test.LambdaTestUtils;
 import org.junit.Assert;
 import org.junit.Test;
 
-import java.lang.reflect.Constructor;
+import java.io.IOException;
 
 /**
  * Raw coder test base with utilities.
  */
 public abstract class TestRawCoderBase extends TestCoderBase {
-  protected Class<? extends RawErasureEncoder> encoderClass;
-  protected Class<? extends RawErasureDecoder> decoderClass;
+  protected Class<? extends RawErasureCoderFactory> encoderFactoryClass;
+  protected Class<? extends RawErasureCoderFactory> decoderFactoryClass;
   protected RawErasureEncoder encoder;
   protected RawErasureDecoder decoder;
 
@@ -62,7 +64,7 @@ public abstract class TestRawCoderBase extends TestCoderBase {
    */
   protected void testCoding(boolean usingDirectBuffer) {
     this.usingDirectBuffer = usingDirectBuffer;
-    prepareCoders();
+    prepareCoders(true);
 
     /**
      * The following runs will use 3 different chunkSize for inputs and outputs,
@@ -79,7 +81,7 @@ public abstract class TestRawCoderBase extends TestCoderBase {
    */
   protected void testCodingWithBadInput(boolean usingDirectBuffer) {
     this.usingDirectBuffer = usingDirectBuffer;
-    prepareCoders();
+    prepareCoders(true);
 
     try {
       performTestCoding(baseChunkSize, false, true, false, true);
@@ -95,7 +97,7 @@ public abstract class TestRawCoderBase extends TestCoderBase {
    */
   protected void testCodingWithBadOutput(boolean usingDirectBuffer) {
     this.usingDirectBuffer = usingDirectBuffer;
-    prepareCoders();
+    prepareCoders(true);
 
     try {
       performTestCoding(baseChunkSize, false, false, true, true);
@@ -103,6 +105,28 @@ public abstract class TestRawCoderBase extends TestCoderBase {
     } catch (Exception e) {
       // Expected
     }
+  }
+
+  /**
+   * Test encode / decode after release(). It should raise IOException.
+   *
+   * @throws Exception
+   */
+  void testAfterRelease() throws Exception {
+    prepareCoders(true);
+    prepareBufferAllocator(true);
+
+    encoder.release();
+    final ECChunk[] data = prepareDataChunksForEncoding();
+    final ECChunk[] parity = prepareParityChunksForEncoding();
+    LambdaTestUtils.intercept(IOException.class, "closed",
+        () -> encoder.encode(data, parity));
+
+    decoder.release();
+    final ECChunk[] in = prepareInputChunksForDecoding(data, parity);
+    final ECChunk[] out = prepareOutputChunksForDecoding();
+    LambdaTestUtils.intercept(IOException.class, "closed",
+        () -> decoder.decode(in, getErasedIndexesForDecoding(), out));
   }
 
   @Test
@@ -119,6 +143,16 @@ public abstract class TestRawCoderBase extends TestCoderBase {
       Assert.fail("Decoding test erasing too many should fail");
     } catch (Exception e) {
       // Expected
+    }
+  }
+
+  @Test
+  public void testIdempotentReleases() {
+    prepareCoders(true);
+
+    for (int i = 0; i < 3; i++) {
+      encoder.release();
+      decoder.release();
     }
   }
 
@@ -145,7 +179,11 @@ public abstract class TestRawCoderBase extends TestCoderBase {
     ECChunk[] clonedDataChunks = cloneChunksWithData(dataChunks);
     markChunks(dataChunks);
 
-    encoder.encode(dataChunks, parityChunks);
+    try {
+      encoder.encode(dataChunks, parityChunks);
+    } catch (IOException e) {
+      Assert.fail("Should not get IOException: " + e.getMessage());
+    }
     dumpChunks("Encoded parity chunks", parityChunks);
 
     if (!allowChangeInputs) {
@@ -175,7 +213,12 @@ public abstract class TestRawCoderBase extends TestCoderBase {
     }
 
     dumpChunks("Decoding input chunks", inputChunks);
-    decoder.decode(inputChunks, getErasedIndexesForDecoding(), recoveredChunks);
+    try {
+      decoder.decode(inputChunks, getErasedIndexesForDecoding(),
+          recoveredChunks);
+    } catch (IOException e) {
+      Assert.fail("Should not get IOException: " + e.getMessage());
+    }
     dumpChunks("Decoded/recovered chunks", recoveredChunks);
 
     if (!allowChangeInputs) {
@@ -189,16 +232,23 @@ public abstract class TestRawCoderBase extends TestCoderBase {
 
   protected void setAllowChangeInputs(boolean allowChangeInputs) {
     this.allowChangeInputs = allowChangeInputs;
-    encoder.setCoderOption(CoderOption.ALLOW_CHANGE_INPUTS, allowChangeInputs);
-    decoder.setCoderOption(CoderOption.ALLOW_CHANGE_INPUTS, allowChangeInputs);
   }
 
-  protected void prepareCoders() {
-    if (encoder == null) {
+  /**
+   * Set true during setup if want to dump test settings and coding data,
+   * useful in debugging.
+   * @param allowDump
+   */
+  protected void setAllowDump(boolean allowDump) {
+    this.allowDump = allowDump;
+  }
+
+  protected void prepareCoders(boolean recreate) {
+    if (encoder == null || recreate) {
       encoder = createEncoder();
     }
 
-    if (decoder == null) {
+    if (decoder == null || recreate) {
       decoder = createDecoder();
     }
   }
@@ -222,18 +272,15 @@ public abstract class TestRawCoderBase extends TestCoderBase {
    * @return
    */
   protected RawErasureEncoder createEncoder() {
-    RawErasureEncoder encoder;
+    ErasureCoderOptions coderConf =
+        new ErasureCoderOptions(numDataUnits, numParityUnits,
+            allowChangeInputs, allowDump);
     try {
-      Constructor<? extends RawErasureEncoder> constructor =
-              (Constructor<? extends RawErasureEncoder>)
-                      encoderClass.getConstructor(int.class, int.class);
-      encoder = constructor.newInstance(numDataUnits, numParityUnits);
+      RawErasureCoderFactory factory = encoderFactoryClass.newInstance();
+      return factory.createEncoder(coderConf);
     } catch (Exception e) {
       throw new RuntimeException("Failed to create encoder", e);
     }
-
-    encoder.setConf(getConf());
-    return encoder;
   }
 
   /**
@@ -241,18 +288,15 @@ public abstract class TestRawCoderBase extends TestCoderBase {
    * @return
    */
   protected RawErasureDecoder createDecoder() {
-    RawErasureDecoder decoder;
+    ErasureCoderOptions coderConf =
+        new ErasureCoderOptions(numDataUnits, numParityUnits,
+            allowChangeInputs, allowDump);
     try {
-      Constructor<? extends RawErasureDecoder> constructor =
-              (Constructor<? extends RawErasureDecoder>)
-                      decoderClass.getConstructor(int.class, int.class);
-      decoder = constructor.newInstance(numDataUnits, numParityUnits);
+      RawErasureCoderFactory factory = encoderFactoryClass.newInstance();
+      return factory.createDecoder(coderConf);
     } catch (Exception e) {
       throw new RuntimeException("Failed to create decoder", e);
     }
-
-    decoder.setConf(getConf());
-    return decoder;
   }
 
   /**
@@ -261,14 +305,18 @@ public abstract class TestRawCoderBase extends TestCoderBase {
    */
   protected void testInputPosition(boolean usingDirectBuffer) {
     this.usingDirectBuffer = usingDirectBuffer;
-    prepareCoders();
+    prepareCoders(true);
     prepareBufferAllocator(false);
 
     // verify encode
     ECChunk[] dataChunks = prepareDataChunksForEncoding();
     ECChunk[] parityChunks = prepareParityChunksForEncoding();
     ECChunk[] clonedDataChunks = cloneChunksWithData(dataChunks);
-    encoder.encode(dataChunks, parityChunks);
+    try {
+      encoder.encode(dataChunks, parityChunks);
+    } catch (IOException e) {
+      Assert.fail("Should not get IOException: " + e.getMessage());
+    }
     verifyBufferPositionAtEnd(dataChunks);
 
     // verify decode
@@ -277,7 +325,12 @@ public abstract class TestRawCoderBase extends TestCoderBase {
         clonedDataChunks, parityChunks);
     ensureOnlyLeastRequiredChunks(inputChunks);
     ECChunk[] recoveredChunks = prepareOutputChunksForDecoding();
-    decoder.decode(inputChunks, getErasedIndexesForDecoding(), recoveredChunks);
+    try {
+      decoder.decode(inputChunks, getErasedIndexesForDecoding(),
+          recoveredChunks);
+    } catch (IOException e) {
+      Assert.fail("Should not get IOException: " + e.getMessage());
+    }
     verifyBufferPositionAtEnd(inputChunks);
   }
 

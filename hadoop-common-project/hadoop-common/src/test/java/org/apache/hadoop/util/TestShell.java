@@ -17,7 +17,9 @@
  */
 package org.apache.hadoop.util;
 
+import com.google.common.base.Supplier;
 import org.apache.commons.io.FileUtils;
+import org.apache.hadoop.security.alias.AbstractJavaKeyStoreProvider;
 import org.junit.Assert;
 
 import java.io.BufferedReader;
@@ -25,15 +27,20 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.io.PrintWriter;
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
+import java.util.HashMap;
+import java.util.Map;
 
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.test.GenericTestUtils;
 
 import static org.apache.hadoop.util.Shell.*;
+import static org.junit.Assume.assumeTrue;
+
 import org.junit.Assume;
 import org.junit.Before;
 import org.junit.Rule;
@@ -145,6 +152,40 @@ public class TestShell extends Assert {
     shellFile.delete();
     assertTrue("Script did not timeout" , shexc.isTimedOut());
   }
+
+  @Test
+  public void testEnvVarsWithInheritance() throws Exception {
+    Assume.assumeFalse(WINDOWS);
+    testEnvHelper(true);
+  }
+
+  @Test
+  public void testEnvVarsWithoutInheritance() throws Exception {
+    Assume.assumeFalse(WINDOWS);
+    testEnvHelper(false);
+  }
+
+  private void testEnvHelper(boolean inheritParentEnv) throws Exception {
+    Map<String, String> customEnv = new HashMap<>();
+    customEnv.put("AAA" + System.currentTimeMillis(), "AAA");
+    customEnv.put("BBB" + System.currentTimeMillis(), "BBB");
+    customEnv.put("CCC" + System.currentTimeMillis(), "CCC");
+    Shell.ShellCommandExecutor command = new ShellCommandExecutor(
+        new String[]{"env"}, null, customEnv, 0L, inheritParentEnv);
+    command.execute();
+    String[] varsArr = command.getOutput().split("\n");
+    Map<String, String> vars = new HashMap<>();
+    for (String var : varsArr) {
+      int eqIndex = var.indexOf('=');
+      vars.put(var.substring(0, eqIndex), var.substring(eqIndex + 1));
+    }
+    Map<String, String> expectedEnv = new HashMap<>();
+    expectedEnv.putAll(customEnv);
+    if (inheritParentEnv) {
+      expectedEnv.putAll(System.getenv());
+    }
+    assertEquals(expectedEnv, vars);
+  }
   
   private static int countTimerThreads() {
     ThreadMXBean threadBean = ManagementFactory.getThreadMXBean();
@@ -198,9 +239,11 @@ public class TestShell extends Assert {
       expectedCommand =
           new String[]{getWinUtilsPath(), "task", "isAlive", anyPid };
     } else if (Shell.isSetsidAvailable) {
-      expectedCommand = new String[] { "bash", "-c", "kill -0 -- -" + anyPid };
+      expectedCommand = new String[] { "bash", "-c", "kill -0 -- -'" +
+            anyPid + "'"};
     } else {
-      expectedCommand = new String[]{ "bash", "-c", "kill -0 " + anyPid };
+      expectedCommand = new String[] {"bash", "-c", "kill -0 '" + anyPid +
+            "'" };
     }
     Assert.assertArrayEquals(expectedCommand, checkProcessAliveCommand);
   }
@@ -218,9 +261,11 @@ public class TestShell extends Assert {
       expectedCommand =
           new String[]{getWinUtilsPath(), "task", "kill", anyPid };
     } else if (Shell.isSetsidAvailable) {
-      expectedCommand = new String[] { "bash", "-c", "kill -9 -- -" + anyPid };
+      expectedCommand = new String[] { "bash", "-c", "kill -9 -- -'" + anyPid +
+            "'"};
     } else {
-      expectedCommand = new String[]{ "bash", "-c", "kill -9 " + anyPid };
+      expectedCommand = new String[]{ "bash", "-c", "kill -9 '" + anyPid +
+            "'"};
     }
     Assert.assertArrayEquals(expectedCommand, checkProcessAliveCommand);
   }
@@ -424,4 +469,71 @@ public class TestShell extends Assert {
     }
   }
 
+  @Test
+  public void testBashQuote() {
+    assertEquals("'foobar'", Shell.bashQuote("foobar"));
+    assertEquals("'foo'\\''bar'", Shell.bashQuote("foo'bar"));
+    assertEquals("''\\''foo'\\''bar'\\'''", Shell.bashQuote("'foo'bar'"));
+  }
+
+  @Test(timeout=120000)
+  public void testDestroyAllShellProcesses() throws Throwable {
+    Assume.assumeFalse(WINDOWS);
+    StringBuffer sleepCommand = new StringBuffer();
+    sleepCommand.append("sleep 200");
+    String[] shellCmd = {"bash", "-c", sleepCommand.toString()};
+    final ShellCommandExecutor shexc1 = new ShellCommandExecutor(shellCmd);
+    final ShellCommandExecutor shexc2 = new ShellCommandExecutor(shellCmd);
+
+    Thread shellThread1 = new Thread() {
+      @Override
+      public void run() {
+        try {
+          shexc1.execute();
+        } catch(IOException ioe) {
+          //ignore IOException from thread interrupt
+        }
+      }
+    };
+    Thread shellThread2 = new Thread() {
+      @Override
+      public void run() {
+        try {
+          shexc2.execute();
+        } catch(IOException ioe) {
+          //ignore IOException from thread interrupt
+        }
+      }
+    };
+
+    shellThread1.start();
+    shellThread2.start();
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+      @Override
+      public Boolean get() {
+        return shexc1.getProcess() != null;
+      }
+    }, 10, 10000);
+
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+      @Override
+      public Boolean get() {
+        return shexc2.getProcess() != null;
+      }
+    }, 10, 10000);
+
+    Shell.destroyAllShellProcesses();
+    shexc1.getProcess().waitFor();
+    shexc2.getProcess().waitFor();
+  }
+
+  @Test
+  public void testIsJavaVersionAtLeast() {
+    assertTrue(Shell.isJavaVersionAtLeast(8));
+  }
+
+  @Test
+  public void testIsBashSupported() throws InterruptedIOException {
+    assumeTrue("Bash is not supported", Shell.checkIsBashSupported());
+  }
 }

@@ -21,7 +21,7 @@ package org.apache.hadoop.metrics2.sink;
 import com.google.common.base.Strings;
 import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.KafkaProducer;
-import org.apache.commons.configuration.SubsetConfiguration;
+import org.apache.commons.configuration2.SubsetConfiguration;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.metrics2.AbstractMetric;
@@ -38,8 +38,10 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.nio.charset.Charset;
-import java.text.SimpleDateFormat;
-import java.util.Date;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.Properties;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
@@ -61,6 +63,12 @@ public class KafkaSink implements MetricsSink, Closeable {
   private String brokerList = null;
   private String topic = null;
   private Producer<Integer, byte[]> producer = null;
+
+  private final DateTimeFormatter dateFormat =
+      DateTimeFormatter.ofPattern("yyyy-MM-dd");
+  private final DateTimeFormatter timeFormat =
+      DateTimeFormatter.ofPattern("HH:mm:ss");
+  private final ZoneId zoneId = ZoneId.systemDefault();
 
   public void setProducer(Producer<Integer, byte[]> p) {
     this.producer = p;
@@ -121,12 +129,11 @@ public class KafkaSink implements MetricsSink, Closeable {
     // Create the json object.
     StringBuilder jsonLines = new StringBuilder();
 
-    Long timestamp = record.timestamp();
-    Date currDate = new Date(timestamp);
-    SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd");
-    SimpleDateFormat timeFormat = new SimpleDateFormat("hh:mm:ss");
-    String date = dateFormat.format(currDate);
-    String time = timeFormat.format(currDate);
+    long timestamp = record.timestamp();
+    Instant instant = Instant.ofEpochMilli(timestamp);
+    LocalDateTime ldt = LocalDateTime.ofInstant(instant, zoneId);
+    String date = ldt.format(dateFormat);
+    String time = ldt.format(timeFormat);
 
     // Collect datapoints and populate the json object.
     jsonLines.append("{\"hostname\": \"" + hostname);

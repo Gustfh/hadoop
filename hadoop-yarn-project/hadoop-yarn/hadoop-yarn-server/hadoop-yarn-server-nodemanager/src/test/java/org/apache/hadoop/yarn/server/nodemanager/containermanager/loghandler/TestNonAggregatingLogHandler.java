@@ -17,14 +17,19 @@
  */
 package org.apache.hadoop.yarn.server.nodemanager.containermanager.loghandler;
 
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyLong;
-import static org.mockito.Matchers.eq;
-import static org.mockito.Matchers.isA;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
+
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isA;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import java.io.File;
@@ -33,6 +38,7 @@ import java.io.IOException;
 import java.io.NotSerializableException;
 import java.io.ObjectInputStream;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.HashMap;
@@ -40,8 +46,8 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.io.FileUtils;
-import org.apache.commons.lang.StringUtils;
-import org.apache.commons.lang.builder.EqualsBuilder;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.builder.EqualsBuilder;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.AbstractFileSystem;
 import org.apache.hadoop.fs.FileContext;
@@ -59,10 +65,12 @@ import org.apache.hadoop.yarn.event.Dispatcher;
 import org.apache.hadoop.yarn.event.DrainDispatcher;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.event.InlineDispatcher;
+import org.apache.hadoop.yarn.server.api.ContainerType;
 import org.apache.hadoop.yarn.server.nodemanager.DeletionService;
 import org.apache.hadoop.yarn.server.nodemanager.LocalDirsHandlerService;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.ApplicationEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.ApplicationEventType;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.deletion.task.FileDeletionMatcher;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.loghandler.event.LogHandlerAppFinishedEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.loghandler.event.LogHandlerAppStartedEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.loghandler.event.LogHandlerContainerFinishedEvent;
@@ -84,7 +92,7 @@ public class TestNonAggregatingLogHandler {
   DeletionService mockDelService;
   Configuration conf;
   DrainDispatcher dispatcher;
-  EventHandler<ApplicationEvent> appEventHandler;
+  private ApplicationEventHandler appEventHandler;
   String user = "testuser";
   ApplicationId appId;
   ApplicationAttemptId appAttemptId;
@@ -97,7 +105,7 @@ public class TestNonAggregatingLogHandler {
     mockDelService = mock(DeletionService.class);
     conf = new YarnConfiguration();
     dispatcher = createDispatcher(conf);
-    appEventHandler = mock(EventHandler.class);
+    appEventHandler = new ApplicationEventHandler();
     dispatcher.register(ApplicationEventType.class, appEventHandler);
     appId = BuilderUtils.newApplicationId(1234, 1);
     appAttemptId = BuilderUtils.newApplicationAttemptId(appId, 1);
@@ -149,7 +157,8 @@ public class TestNonAggregatingLogHandler {
 
     logHandler.handle(new LogHandlerAppStartedEvent(appId, user, null, null));
 
-    logHandler.handle(new LogHandlerContainerFinishedEvent(container11, 0));
+    logHandler.handle(new LogHandlerContainerFinishedEvent(container11,
+        ContainerType.APPLICATION_MASTER, 0));
 
     logHandler.handle(new LogHandlerAppFinishedEvent(appId));
 
@@ -189,7 +198,8 @@ public class TestNonAggregatingLogHandler {
 
     logHandler.handle(new LogHandlerAppStartedEvent(appId, user, null, null));
 
-    logHandler.handle(new LogHandlerContainerFinishedEvent(container11, 0));
+    logHandler.handle(new LogHandlerContainerFinishedEvent(container11,
+        ContainerType.APPLICATION_MASTER, 0));
 
     logHandler.handle(new LogHandlerAppFinishedEvent(appId));
 
@@ -345,6 +355,9 @@ public class TestNonAggregatingLogHandler {
 
     dirsHandler.init(conf);
 
+    appEventHandler.resetLogHandlingEvent();
+    assertFalse(appEventHandler.receiveLogHandlingFinishEvent());
+
     NMStateStoreService stateStore = new NMMemoryStateStoreService();
     stateStore.init(conf);
     stateStore.start();
@@ -355,7 +368,8 @@ public class TestNonAggregatingLogHandler {
     logHandler.start();
 
     logHandler.handle(new LogHandlerAppStartedEvent(appId, user, null, null));
-    logHandler.handle(new LogHandlerContainerFinishedEvent(container11, 0));
+    logHandler.handle(new LogHandlerContainerFinishedEvent(container11,
+        ContainerType.APPLICATION_MASTER, 0));
     logHandler.handle(new LogHandlerAppFinishedEvent(appId));
 
     // simulate a restart and verify deletion is rescheduled
@@ -377,8 +391,21 @@ public class TestNonAggregatingLogHandler {
     logHandler.start();
     verify(logHandler.mockSched, never()).schedule(any(Runnable.class),
         anyLong(), any(TimeUnit.class));
+
+    // wait events get drained.
+    this.dispatcher.await();
+    assertTrue(appEventHandler.receiveLogHandlingFinishEvent());
+
+    appEventHandler.resetLogHandlingEvent();
+    assertFalse(appEventHandler.receiveLogHandlingFailedEvent());
+    // send an app finish event against a removed app
+    logHandler.handle(new LogHandlerAppFinishedEvent(appId));
+    this.dispatcher.await();
+    // verify to receive a log failed event.
+    assertTrue(appEventHandler.receiveLogHandlingFailedEvent());
+    assertFalse(appEventHandler.receiveLogHandlingFinishEvent());
     logHandler.close();
-   }
+  }
 
   /**
    * Function to run a log handler with directories failing the getFileStatus
@@ -466,8 +493,8 @@ public class TestNonAggregatingLogHandler {
     return;
   }
 
-  static class DeletePathsMatcher extends ArgumentMatcher<Path[]> implements
-      VarargMatcher {
+  static class DeletePathsMatcher implements
+      ArgumentMatcher<Path[]>, VarargMatcher {
     
     // to get rid of serialization warning
     static final long serialVersionUID = 0;
@@ -479,7 +506,7 @@ public class TestNonAggregatingLogHandler {
     }
 
     @Override
-    public boolean matches(Object varargs) {
+    public boolean matches(Path[] varargs) {
       return new EqualsBuilder().append(matchPaths, varargs).isEquals();
     }
 
@@ -512,8 +539,8 @@ public class TestNonAggregatingLogHandler {
     boolean matched = false;
     while (!matched && System.currentTimeMillis() < verifyStartTime + timeout) {
       try {
-        verify(delService).delete(eq(user), (Path) eq(null),
-          Mockito.argThat(new DeletePathsMatcher(matchPaths)));
+        verify(delService, times(1)).delete(argThat(new FileDeletionMatcher(
+            delService, user, null, Arrays.asList(matchPaths))));
         matched = true;
       } catch (WantedButNotInvoked e) {
         notInvokedException = e;
@@ -536,4 +563,37 @@ public class TestNonAggregatingLogHandler {
     }
     return dirs;
   }
+
+  class ApplicationEventHandler implements EventHandler<ApplicationEvent> {
+
+    private boolean logHandlingFinished = false;
+    private boolean logHandlingFailed = false;
+
+    @Override
+    public void handle(ApplicationEvent event) {
+      switch (event.getType()) {
+      case APPLICATION_LOG_HANDLING_FINISHED:
+        logHandlingFinished = true;
+        break;
+      case APPLICATION_LOG_HANDLING_FAILED:
+        logHandlingFailed = true;
+      default:
+        // do nothing.
+      }
+    }
+
+    public boolean receiveLogHandlingFinishEvent() {
+      return logHandlingFinished;
+    }
+
+    public boolean receiveLogHandlingFailedEvent() {
+      return logHandlingFailed;
+    }
+
+    public void resetLogHandlingEvent() {
+      logHandlingFinished = false;
+      logHandlingFailed = false;
+    }
+  }
+
 }

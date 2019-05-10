@@ -20,8 +20,8 @@ package org.apache.hadoop.hdfs.server.datanode;
 import java.util.Collection;
 import java.util.Random;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSClientAdapter;
@@ -44,7 +44,8 @@ import org.junit.Test;
 
 /** Test transferring RBW between datanodes */
 public class TestTransferRbw {
-  private static final Log LOG = LogFactory.getLog(TestTransferRbw.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestTransferRbw.class);
   
   {
     GenericTestUtils.setLogLevel(DataNode.LOG, Level.ALL);
@@ -57,7 +58,7 @@ public class TestTransferRbw {
       String bpid) throws InterruptedException {
     return (ReplicaBeingWritten)getReplica(datanode, bpid, ReplicaState.RBW);
   }
-  private static ReplicaInPipeline getReplica(final DataNode datanode,
+  private static LocalReplicaInPipeline getReplica(final DataNode datanode,
       final String bpid, final ReplicaState expectedState) throws InterruptedException {
     final Collection<ReplicaInfo> replicas = FsDatasetTestUtil.getReplicas(
         datanode.getFSDataset(), bpid);
@@ -68,7 +69,7 @@ public class TestTransferRbw {
     Assert.assertEquals(1, replicas.size());
     final ReplicaInfo r = replicas.iterator().next();
     Assert.assertEquals(expectedState, r.getState());
-    return (ReplicaInPipeline)r;
+    return (LocalReplicaInPipeline)r;
   }
 
   @Test

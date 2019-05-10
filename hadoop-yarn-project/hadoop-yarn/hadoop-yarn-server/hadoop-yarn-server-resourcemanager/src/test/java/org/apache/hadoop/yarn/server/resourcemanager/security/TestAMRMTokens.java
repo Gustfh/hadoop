@@ -31,8 +31,8 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.concurrent.atomic.AtomicReference;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.io.Text;
@@ -77,7 +77,8 @@ import org.junit.runners.Parameterized.Parameters;
 @RunWith(Parameterized.class)
 public class TestAMRMTokens {
 
-  private static final Log LOG = LogFactory.getLog(TestAMRMTokens.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestAMRMTokens.class);
 
   private final Configuration conf;
   private static final int maxWaitAttempts = 50;
@@ -113,6 +114,8 @@ public class TestAMRMTokens {
             DEFAULT_RM_AMRM_TOKEN_MASTER_KEY_ROLLING_INTERVAL_SECS);
     conf.setLong(YarnConfiguration.RM_AM_EXPIRY_INTERVAL_MS,
         YarnConfiguration.DEFAULT_RM_AM_EXPIRY_INTERVAL_MS);
+    conf.set(YarnConfiguration.RM_SCHEDULER_ADDRESS,
+        "0.0.0.0:0");
 
     MyContainerManager containerManager = new MyContainerManager();
     final MockRMWithAMS rm =
@@ -230,6 +233,8 @@ public class TestAMRMTokens {
       YarnConfiguration.RM_AMRM_TOKEN_MASTER_KEY_ROLLING_INTERVAL_SECS,
       rolling_interval_sec);
     conf.setLong(YarnConfiguration.RM_AM_EXPIRY_INTERVAL_MS, am_expire_ms);
+    conf.set(YarnConfiguration.RM_SCHEDULER_ADDRESS,
+        "0.0.0.0:0");
     MyContainerManager containerManager = new MyContainerManager();
     final MockRMWithAMS rm =
         new MockRMWithAMS(conf, containerManager);

@@ -120,7 +120,8 @@ public class LocatedFileStatusFetcher {
       runningTasks.incrementAndGet();
       ListenableFuture<ProcessInitialInputPathCallable.Result> future = exec
           .submit(new ProcessInitialInputPathCallable(p, conf, inputFilter));
-      Futures.addCallback(future, processInitialInputPathCallback);
+      Futures.addCallback(future, processInitialInputPathCallback,
+          MoreExecutors.directExecutor());
     }
 
     runningTasks.decrementAndGet();
@@ -175,7 +176,7 @@ public class LocatedFileStatusFetcher {
   private void registerError(Throwable t) {
     lock.lock();
     try {
-      if (unknownError != null) {
+      if (unknownError == null) {
         unknownError = t;
         condition.signal();
       }
@@ -267,7 +268,8 @@ public class LocatedFileStatusFetcher {
             ListenableFuture<ProcessInputDirCallable.Result> future = exec
                 .submit(new ProcessInputDirCallable(result.fs, fileStatus,
                     recursive, inputFilter));
-            Futures.addCallback(future, processInputDirCallback);
+            Futures.addCallback(future, processInputDirCallback,
+                MoreExecutors.directExecutor());
           }
         }
         decrementRunningAndCheckCompletion();
@@ -353,7 +355,8 @@ public class LocatedFileStatusFetcher {
             ListenableFuture<ProcessInputDirCallable.Result> future = exec
                 .submit(new ProcessInputDirCallable(result.fs, matched,
                     recursive, inputFilter));
-            Futures.addCallback(future, processInputDirCallback);
+            Futures.addCallback(future, processInputDirCallback,
+                MoreExecutors.directExecutor());
           }
         }
         decrementRunningAndCheckCompletion();

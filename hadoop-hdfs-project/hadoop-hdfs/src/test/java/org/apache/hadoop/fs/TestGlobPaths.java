@@ -17,16 +17,16 @@
  */
 package org.apache.hadoop.fs;
 
+import static org.apache.hadoop.test.PlatformAssumptions.assumeNotWindows;
 import static org.junit.Assert.*;
 
 import java.io.IOException;
-import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
 import com.google.common.collect.Ordering;
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
@@ -86,6 +86,25 @@ public class TestGlobPaths {
     if(dfsCluster!=null) {
       dfsCluster.shutdown();
     }
+  }
+
+  /**
+   * Test case to ensure that globs work on files with special characters.
+   * Tests with a file pair where one has a \r at end and other does not.
+   */
+  @Test
+  public void testCRInPathGlob() throws IOException {
+    FileStatus[] statuses;
+    Path d1 = new Path(USER_DIR, "dir1");
+    Path fNormal = new Path(d1, "f1");
+    Path fWithCR = new Path(d1, "f1\r");
+    fs.mkdirs(d1);
+    fs.createNewFile(fNormal);
+    fs.createNewFile(fWithCR);
+    statuses = fs.globStatus(new Path(d1, "f1*"));
+    assertEquals("Expected both normal and CR-carrying files in result: ",
+        2, statuses.length);
+    cleanupDFS();
   }
 
   @Test
@@ -476,7 +495,7 @@ public class TestGlobPaths {
   public void pTestEscape() throws IOException {
     // Skip the test case on Windows because backslash will be treated as a
     // path separator instead of an escaping character on Windows.
-    org.junit.Assume.assumeTrue(!Path.WINDOWS);
+    assumeNotWindows();
     try {
       String [] files = new String[] {USER_DIR+"/ab\\[c.d"};
       Path[] matchedPath = prepareTesting(USER_DIR+"/ab\\[c.d", files);

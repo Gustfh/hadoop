@@ -25,11 +25,12 @@ import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.Marker;
+import org.slf4j.MarkerFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Public;
 import org.apache.hadoop.classification.InterfaceStability.Evolving;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.util.ShutdownHookManager;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
@@ -47,7 +48,10 @@ import com.google.common.annotations.VisibleForTesting;
 @Evolving
 public class AsyncDispatcher extends AbstractService implements Dispatcher {
 
-  private static final Log LOG = LogFactory.getLog(AsyncDispatcher.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(AsyncDispatcher.class);
+  private static final Marker FATAL =
+      MarkerFactory.getMarker("FATAL");
 
   private final BlockingQueue<Event> eventQueue;
   private volatile int lastEventQueueSizeLogged = 0;
@@ -59,17 +63,25 @@ public class AsyncDispatcher extends AbstractService implements Dispatcher {
 
   // Indicates all the remaining dispatcher's events on stop have been drained
   // and processed.
+  // Race condition happens if dispatcher thread sets drained to true between
+  // handler setting drained to false and enqueueing event. YARN-3878 decided
+  // to ignore it because of its tiny impact. Also see YARN-5436.
   private volatile boolean drained = true;
   private final Object waitForDrained = new Object();
 
   // For drainEventsOnStop enabled only, block newly coming events into the
   // queue while stopping.
   private volatile boolean blockNewEvents = false;
-  private final EventHandler handlerInstance = new GenericEventHandler();
+  private final EventHandler<Event> handlerInstance = new GenericEventHandler();
 
   private Thread eventHandlingThread;
   protected final Map<Class<? extends Enum>, EventHandler> eventDispatchers;
-  private boolean exitOnDispatchException;
+  private boolean exitOnDispatchException = true;
+
+  /**
+   * The thread name for dispatcher.
+   */
+  private String dispatcherThreadName = "AsyncDispatcher event handler";
 
   public AsyncDispatcher() {
     this(new LinkedBlockingQueue<Event>());
@@ -79,6 +91,15 @@ public class AsyncDispatcher extends AbstractService implements Dispatcher {
     super("Dispatcher");
     this.eventQueue = eventQueue;
     this.eventDispatchers = new HashMap<Class<? extends Enum>, EventHandler>();
+  }
+
+  /**
+   * Set a name for this dispatcher thread.
+   * @param dispatcherName name of the dispatcher thread
+   */
+  public AsyncDispatcher(String dispatcherName) {
+    this();
+    dispatcherThreadName = dispatcherName;
   }
 
   Runnable createThread() {
@@ -114,12 +135,9 @@ public class AsyncDispatcher extends AbstractService implements Dispatcher {
     };
   }
 
-  @Override
-  protected void serviceInit(Configuration conf) throws Exception {
-    this.exitOnDispatchException =
-        conf.getBoolean(Dispatcher.DISPATCHER_EXIT_ON_ERROR_KEY,
-          Dispatcher.DEFAULT_DISPATCHER_EXIT_ON_ERROR);
-    super.serviceInit(conf);
+  @VisibleForTesting
+  public void disableExitOnDispatchException() {
+    exitOnDispatchException = false;
   }
 
   @Override
@@ -127,7 +145,7 @@ public class AsyncDispatcher extends AbstractService implements Dispatcher {
     //start all the components
     super.serviceStart();
     eventHandlingThread = new Thread(createThread());
-    eventHandlingThread.setName("AsyncDispatcher event handler");
+    eventHandlingThread.setName(dispatcherThreadName);
     eventHandlingThread.start();
   }
 
@@ -139,16 +157,16 @@ public class AsyncDispatcher extends AbstractService implements Dispatcher {
   protected void serviceStop() throws Exception {
     if (drainEventsOnStop) {
       blockNewEvents = true;
-      LOG.info("AsyncDispatcher is draining to stop, igonring any new events.");
+      LOG.info("AsyncDispatcher is draining to stop, ignoring any new events.");
       long endTime = System.currentTimeMillis() + getConfig()
           .getLong(YarnConfiguration.DISPATCHER_DRAIN_EVENTS_TIMEOUT,
               YarnConfiguration.DEFAULT_DISPATCHER_DRAIN_EVENTS_TIMEOUT);
 
       synchronized (waitForDrained) {
-        while (!drained && eventHandlingThread != null
+        while (!isDrained() && eventHandlingThread != null
             && eventHandlingThread.isAlive()
             && System.currentTimeMillis() < endTime) {
-          waitForDrained.wait(1000);
+          waitForDrained.wait(100);
           LOG.info("Waiting for AsyncDispatcher to drain. Thread state is :" +
               eventHandlingThread.getState());
         }
@@ -171,10 +189,8 @@ public class AsyncDispatcher extends AbstractService implements Dispatcher {
   @SuppressWarnings("unchecked")
   protected void dispatch(Event event) {
     //all events go thru this loop
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Dispatching the event " + event.getClass().getName() + "."
-          + event.toString());
-    }
+    LOG.debug("Dispatching the event {}.{}", event.getClass().getName(),
+        event);
 
     Class<? extends Enum> type = event.getType().getDeclaringClass();
 
@@ -187,11 +203,12 @@ public class AsyncDispatcher extends AbstractService implements Dispatcher {
       }
     } catch (Throwable t) {
       //TODO Maybe log the state of the queue
-      LOG.fatal("Error in dispatcher thread", t);
+      LOG.error(FATAL, "Error in dispatcher thread", t);
       // If serviceStop is called, we should exit this thread gracefully.
       if (exitOnDispatchException
           && (ShutdownHookManager.get().isShutdownInProgress()) == false
           && stopped == false) {
+        stopped = true;
         Thread shutDownThread = new Thread(createShutDownThread());
         shutDownThread.setName("AsyncDispatcher ShutDown handler");
         shutDownThread.start();
@@ -224,7 +241,7 @@ public class AsyncDispatcher extends AbstractService implements Dispatcher {
   }
 
   @Override
-  public EventHandler getEventHandler() {
+  public EventHandler<Event> getEventHandler() {
     return handlerInstance;
   }
 
@@ -301,8 +318,11 @@ public class AsyncDispatcher extends AbstractService implements Dispatcher {
     return eventHandlingThread.getState() == Thread.State.WAITING;
   }
 
-  @VisibleForTesting
   protected boolean isDrained() {
-    return this.drained;
+    return drained;
+  }
+
+  protected boolean isStopped() {
+    return stopped;
   }
 }

@@ -41,7 +41,10 @@ public class TestHdfsConfigFields extends TestConfigurationFieldsBase {
   public void initializeMemberVariables() {
     xmlFilename = new String("hdfs-default.xml");
     configurationClasses = new Class[] { HdfsClientConfigKeys.class,
-        DFSConfigKeys.class};
+        HdfsClientConfigKeys.Failover.class,
+        HdfsClientConfigKeys.StripedRead.class, DFSConfigKeys.class,
+        HdfsClientConfigKeys.BlockWrite.class,
+        HdfsClientConfigKeys.BlockWrite.ReplaceDatanodeOnFailure.class };
 
     // Set error modes
     errorIfMissingConfigProps = true;
@@ -56,12 +59,6 @@ public class TestHdfsConfigFields extends TestConfigurationFieldsBase {
     // Remove deprecated properties listed in Configuration#DeprecationDelta
     configurationPropsToSkipCompare.add(DFSConfigKeys.DFS_DF_INTERVAL_KEY);
 
-    // Remove default properties
-    configurationPropsToSkipCompare
-        .add(DFSConfigKeys.DFS_IMAGE_COMPRESSION_CODEC_DEFAULT);
-    configurationPropsToSkipCompare
-        .add(DFSConfigKeys.DFS_WEBHDFS_AUTHENTICATION_FILTER_DEFAULT);
-
     // Remove support property
     configurationPropsToSkipCompare
         .add(DFSConfigKeys.DFS_NAMENODE_MIN_SUPPORTED_DATANODE_VERSION_KEY);
@@ -75,8 +72,6 @@ public class TestHdfsConfigFields extends TestConfigurationFieldsBase {
     // Fully deprecated properties?
     configurationPropsToSkipCompare
         .add("dfs.corruptfilesreturned.max");
-    configurationPropsToSkipCompare
-        .add("dfs.datanode.hdfs-blocks-metadata.enabled");
     configurationPropsToSkipCompare
         .add("dfs.metrics.session-id");
     configurationPropsToSkipCompare
@@ -106,6 +101,8 @@ public class TestHdfsConfigFields extends TestConfigurationFieldsBase {
         .add(DFSConfigKeys.DFS_DATANODE_STARTUP_KEY);
     configurationPropsToSkipCompare
         .add(DFSConfigKeys.DFS_NAMENODE_STARTUP_KEY);
+    configurationPropsToSkipCompare.add(DFSConfigKeys
+        .DFS_DATANODE_ENABLE_FILEIO_FAULT_INJECTION_KEY);
 
     // Allocate
     xmlPropsToSkipCompare = new HashSet<String>();

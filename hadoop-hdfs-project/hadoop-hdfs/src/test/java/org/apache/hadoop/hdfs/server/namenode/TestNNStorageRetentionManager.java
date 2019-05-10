@@ -20,6 +20,7 @@ package org.apache.hadoop.hdfs.server.namenode;
 import static org.apache.hadoop.hdfs.server.namenode.NNStorage.getFinalizedEditsFileName;
 import static org.apache.hadoop.hdfs.server.namenode.NNStorage.getImageFileName;
 import static org.apache.hadoop.hdfs.server.namenode.NNStorage.getInProgressEditsFileName;
+import static org.mockito.ArgumentMatchers.any;
 
 import java.io.File;
 import java.io.IOException;
@@ -368,11 +369,11 @@ public class TestNNStorageRetentionManager {
         public Void answer(InvocationOnMock invocation) throws Throwable {
           Object[] args = invocation.getArguments();
           journalSet.selectInputStreams((Collection<EditLogInputStream>)args[0],
-              (Long)args[1], (Boolean)args[2]);
+              (Long)args[1], (Boolean)args[2], (Boolean)args[3]);
           return null;
         }
       }).when(mockLog).selectInputStreams(Mockito.anyCollection(),
-          Mockito.anyLong(), Mockito.anyBoolean());
+          Mockito.anyLong(), Mockito.anyBoolean(), Mockito.anyBoolean());
       return mockLog;
     }
   }
@@ -414,8 +415,7 @@ public class TestNNStorageRetentionManager {
         }
         return null;
       }
-    }).when(mockStorage).inspectStorageDirs(
-        Mockito.<FSImageStorageInspector>anyObject());
+    }).when(mockStorage).inspectStorageDirs(any());
     return mockStorage;
   }
 }

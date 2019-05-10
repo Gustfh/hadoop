@@ -19,12 +19,11 @@
   <parent>
     <artifactId>hadoop-yarn</artifactId>
     <groupId>org.apache.hadoop</groupId>
-    <version>3.0.0-SNAPSHOT</version>
+    <version>3.3.0-SNAPSHOT</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
-  <groupId>org.apache.hadoop</groupId>
   <artifactId>hadoop-yarn-applications</artifactId>
-  <version>3.0.0-SNAPSHOT</version>
+  <version>3.3.0-SNAPSHOT</version>
   <name>Apache Hadoop YARN Applications</name>
   <packaging>pom</packaging>
 
@@ -37,6 +36,9 @@
   <modules>
     <module>hadoop-yarn-applications-distributedshell</module>
     <module>hadoop-yarn-applications-unmanaged-am-launcher</module>
+    <module>hadoop-yarn-services</module>
+    <module>hadoop-yarn-applications-catalog</module>
+    <module>hadoop-yarn-applications-mawo</module>
   </modules>
 
  <profiles>

@@ -19,16 +19,23 @@
 package org.apache.hadoop.ipc;
 
 import static java.lang.Thread.sleep;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
+
+import static org.junit.Assert.*;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.conf.Configuration;
+
+import javax.management.MBeanServer;
+import javax.management.ObjectName;
+
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.lang.management.ManagementFactory;
 
 public class TestDecayRpcScheduler {
   private Schedulable mockCall(String id) {
@@ -189,12 +196,14 @@ public class TestDecayRpcScheduler {
 
   @Test
   @SuppressWarnings("deprecation")
-  public void testPriority() {
+  public void testPriority() throws Exception {
     Configuration conf = new Configuration();
-    conf.set("ns." + DecayRpcScheduler.IPC_FCQ_DECAYSCHEDULER_PERIOD_KEY, "99999999"); // Never flush
-    conf.set("ns." + DecayRpcScheduler.IPC_FCQ_DECAYSCHEDULER_THRESHOLDS_KEY,
-      "25, 50, 75");
-    scheduler = new DecayRpcScheduler(4, "ns", conf);
+    final String namespace = "ns";
+    conf.set(namespace + "." + DecayRpcScheduler
+        .IPC_FCQ_DECAYSCHEDULER_PERIOD_KEY, "99999999"); // Never flush
+    conf.set(namespace + "." + DecayRpcScheduler
+        .IPC_FCQ_DECAYSCHEDULER_THRESHOLDS_KEY, "25, 50, 75");
+    scheduler = new DecayRpcScheduler(4, namespace, conf);
 
     assertEquals(0, scheduler.getPriorityLevel(mockCall("A")));
     assertEquals(2, scheduler.getPriorityLevel(mockCall("A")));
@@ -206,6 +215,20 @@ public class TestDecayRpcScheduler {
     assertEquals(1, scheduler.getPriorityLevel(mockCall("A")));
     assertEquals(1, scheduler.getPriorityLevel(mockCall("A")));
     assertEquals(2, scheduler.getPriorityLevel(mockCall("A")));
+
+    MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
+    ObjectName mxbeanName = new ObjectName(
+        "Hadoop:service="+ namespace + ",name=DecayRpcScheduler");
+
+    String cvs1 = (String) mbs.getAttribute(mxbeanName, "CallVolumeSummary");
+    assertTrue("Get expected JMX of CallVolumeSummary before decay",
+        cvs1.equals("{\"A\":6,\"B\":2,\"C\":2}"));
+
+    scheduler.forceDecay();
+
+    String cvs2 = (String) mbs.getAttribute(mxbeanName, "CallVolumeSummary");
+    assertTrue("Get expected JMX for CallVolumeSummary after decay",
+        cvs2.equals("{\"A\":3,\"B\":1,\"C\":1}"));
   }
 
   @Test(timeout=2000)
@@ -227,5 +250,28 @@ public class TestDecayRpcScheduler {
     while (scheduler.getTotalCallSnapshot() > 0) {
       sleep(10);
     }
+  }
+
+  @Test(timeout=60000)
+  public void testNPEatInitialization() throws InterruptedException {
+    // redirect the LOG to and check if there is NPE message while initializing
+    // the DecayRpcScheduler
+    PrintStream output = System.out;
+    try {
+      ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+      System.setOut(new PrintStream(bytes));
+
+      // initializing DefaultMetricsSystem here would set "monitoring" flag in
+      // MetricsSystemImpl to true
+      DefaultMetricsSystem.initialize("NameNode");
+      Configuration conf = new Configuration();
+      scheduler = new DecayRpcScheduler(1, "ns", conf);
+      // check if there is npe in log
+      assertFalse(bytes.toString().contains("NullPointerException"));
+    } finally {
+      //set systout back
+      System.setOut(output);
+    }
+
   }
 }
